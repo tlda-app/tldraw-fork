@@ -2,6 +2,7 @@ import { computed, isUninitialized } from '@tldraw/state'
 import { TLShapeId } from '@tldraw/tlschema'
 import type { Editor } from '../Editor'
 import { ShapeUtil } from '../shapes/ShapeUtil'
+import { TLViewport } from '../viewports/TLViewport'
 
 /**
  * Non visible shapes are shapes outside of the viewport page bounds.
@@ -69,4 +70,39 @@ export function notVisibleShapes(editor: Editor) {
 
 		return notVisibleIds
 	})
+}
+
+/** @public */
+export function getNotVisibleShapesForViewport(editor: Editor, viewport: TLViewport) {
+	const emptySet = new Set<TLShapeId>()
+	const allShapeIds = editor.getCurrentPageShapeIds()
+	const viewportPageBounds = editor.getViewportPageBounds({ viewport })
+	const visibleIds = editor.getShapeIdsInsideBounds(viewportPageBounds)
+
+	if (visibleIds.size === allShapeIds.size) {
+		return emptySet
+	}
+
+	const notVisibleIds = new Set<TLShapeId>()
+	const defaultCanCull = ShapeUtil.prototype.canCull
+
+	for (const id of allShapeIds) {
+		if (visibleIds.has(id)) continue
+
+		const peek = editor.store.unsafeGetWithoutCapture(id)
+		if (!peek) continue
+		const util = editor.getShapeUtil(peek.type)
+
+		if (util.canCull === defaultCanCull) {
+			notVisibleIds.add(id)
+			continue
+		}
+
+		const shape = editor.getShape(id)
+		if (!shape) continue
+		if (!util.canCull(shape)) continue
+		notVisibleIds.add(id)
+	}
+
+	return notVisibleIds
 }

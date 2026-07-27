@@ -4,6 +4,7 @@ import { useEditor } from '../../hooks/useEditor'
 import { Geometry2d } from '../../primitives/geometry/Geometry2d'
 import { Group2d } from '../../primitives/geometry/Group2d'
 import { debugFlags } from '../../utils/debug-flags'
+import { TLViewportId, type TLViewport } from '../../editor/viewports/TLViewport'
 
 interface RenderInputs {
 	dpr: number
@@ -14,8 +15,18 @@ interface RenderInputs {
 	zoom: number
 }
 
+interface CanvasOverlaysProps {
+	viewportId?: TLViewportId
+	camera?: TLViewport['camera']
+	screenBounds?: TLViewport['screenBounds']
+}
+
 /** @internal @react */
-export const CanvasOverlays = memo(function CanvasOverlays() {
+export const CanvasOverlays = memo(function CanvasOverlays({
+	viewportId,
+	camera: viewportCamera,
+	screenBounds: viewportScreenBounds,
+}: CanvasOverlaysProps) {
 	const editor = useEditor()
 	const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -29,11 +40,12 @@ export const CanvasOverlays = memo(function CanvasOverlays() {
 			'canvas overlays render inputs',
 			() => {
 				const instance = editor.getInstanceState()
-				const camera = editor.getCamera()
+				const camera = viewportCamera ?? editor.getCamera()
+				const screenBounds = viewportScreenBounds ?? instance.screenBounds
 				return {
 					dpr: instance.devicePixelRatio,
-					w: instance.screenBounds.w,
-					h: instance.screenBounds.h,
+					w: screenBounds.w,
+					h: screenBounds.h,
 					cx: camera.x,
 					cy: camera.y,
 					zoom: camera.z,
@@ -88,7 +100,7 @@ export const CanvasOverlays = memo(function CanvasOverlays() {
 				const currentPagePoint = editor.inputs.getCurrentPagePoint()
 
 				// Shape geometries
-				const renderingShapes = editor.getRenderingShapes()
+				const renderingShapes = editor.getRenderingShapes({ viewportId })
 				for (const result of renderingShapes) {
 					const shape = editor.getShape(result.id)
 					if (!shape || shape.type === 'group') continue
@@ -175,7 +187,7 @@ export const CanvasOverlays = memo(function CanvasOverlays() {
 		scheduler.attach()
 		scheduler.execute()
 		return () => scheduler.detach()
-	}, [editor])
+	}, [editor, viewportCamera, viewportId, viewportScreenBounds])
 
 	return <canvas ref={canvasRef} className="tl-canvas-overlays" />
 })

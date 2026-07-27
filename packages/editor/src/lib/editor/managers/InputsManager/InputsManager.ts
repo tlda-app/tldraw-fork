@@ -7,6 +7,7 @@ import { Vec } from '../../../primitives/Vec'
 import { isAccelKey } from '../../../utils/keyboard'
 import type { Editor } from '../../Editor'
 import { TLPinchEventInfo, TLPointerEventInfo, TLWheelEventInfo } from '../../types/event-types'
+import { DEFAULT_VIEWPORT_ID } from '../../viewports/TLViewport'
 
 const POINTER_VELOCITY_REFERENCE_INTERVAL_MS = 16
 const POINTER_VELOCITY_REFERENCE_SMOOTHING = 0.5
@@ -516,8 +517,18 @@ export class InputsManager {
 		const currentScreenPoint = this._currentScreenPoint.__unsafe__getWithoutCapture()
 		const currentPagePoint = this._currentPagePoint.__unsafe__getWithoutCapture()
 		const isPinching = this._isPinching.__unsafe__getWithoutCapture()
-		const { screenBounds } = this.editor.store.unsafeGetWithoutCapture(TLINSTANCE_ID)!
-		const { x: cx, y: cy, z: cz } = unsafe__withoutCapture(() => this.editor.getCamera())
+		const viewport =
+			info.viewportId && info.viewportId !== DEFAULT_VIEWPORT_ID
+				? unsafe__withoutCapture(() => this.editor.getViewport(info.viewportId))
+				: null
+		const screenBounds =
+			viewport?.screenBounds ??
+			this.editor.store.unsafeGetWithoutCapture(TLINSTANCE_ID)!.screenBounds
+		const {
+			x: cx,
+			y: cy,
+			z: cz,
+		} = viewport?.camera ?? unsafe__withoutCapture(() => this.editor.getCamera())
 
 		const sx = info.point.x - screenBounds.x
 		const sy = info.point.y - screenBounds.y

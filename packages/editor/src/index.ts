@@ -38,6 +38,7 @@ export {
 export { HTMLContainer, type HTMLContainerProps } from './lib/components/HTMLContainer'
 export { MenuClickCapture } from './lib/components/MenuClickCapture'
 export { SVGContainer, type SVGContainerProps } from './lib/components/SVGContainer'
+export { TldrawViewport, type TldrawViewportProps } from './lib/components/TldrawViewport'
 export {
 	createTLCurrentUser,
 	useTldrawCurrentUser,
@@ -98,6 +99,13 @@ export {
 	type TLRenderingShape,
 	type TLResizeShapeOptions,
 } from './lib/editor/Editor'
+export {
+	DEFAULT_VIEWPORT_ID,
+	getViewportPageBounds,
+	type TLViewport,
+	type TLViewportId,
+	type TLViewportOptions,
+} from './lib/editor/viewports/TLViewport'
 export { ClickManager, type TLClickState } from './lib/editor/managers/ClickManager/ClickManager'
 export { EdgeScrollManager } from './lib/editor/managers/EdgeScrollManager/EdgeScrollManager'
 export { FontManager } from './lib/editor/managers/FontManager/FontManager'

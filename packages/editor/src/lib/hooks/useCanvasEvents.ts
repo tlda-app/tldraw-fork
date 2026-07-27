@@ -1,5 +1,6 @@
 import { useValue } from '@tldraw/state-react'
 import React, { useEffect, useMemo } from 'react'
+import { DEFAULT_VIEWPORT_ID, TLViewportId } from '../editor/viewports/TLViewport'
 import { tlenv } from '../globals/environment'
 import {
 	elementShouldCaptureKeys,
@@ -11,10 +12,21 @@ import { getPointerInfo } from '../utils/getPointerInfo'
 import { getPointerEventButton, isDirectDisplayPen, isSecondaryClickEvent } from '../utils/pointer'
 import { useEditor } from './useEditor'
 
-export function useCanvasEvents() {
+let activePointerOwner:
+	| {
+			pointerId: number
+			viewportId: TLViewportId
+			editor: ReturnType<typeof useEditor>
+	  }
+	| undefined
+
+export function useCanvasEvents(opts?: { viewportId?: TLViewportId }) {
 	const editor = useEditor()
 	const ownerDocument = editor.getContainerDocument()
 	const currentTool = useValue('current tool', () => editor.getCurrentTool(), [editor])
+	const viewportId = opts?.viewportId ?? DEFAULT_VIEWPORT_ID
+	const isDefaultViewport = viewportId === DEFAULT_VIEWPORT_ID
+	const eventViewportId = isDefaultViewport ? undefined : viewportId
 
 	const events = useMemo(
 		function canvasEvents() {
@@ -32,7 +44,7 @@ export function useCanvasEvents() {
 						type: 'pointer',
 						target: 'canvas',
 						name: 'right_click',
-						...getPointerInfo(editor, e),
+						...getPointerInfo(editor, e, { viewportId: eventViewportId }),
 					})
 					return
 				}
@@ -44,18 +56,23 @@ export function useCanvasEvents() {
 				const isPenDirect = isDirectDisplayPen(e)
 
 				setPointerCapture(e.currentTarget, e)
+				activePointerOwner = { pointerId: e.pointerId, viewportId, editor }
 
 				editor.dispatch({
 					type: 'pointer',
 					target: 'canvas',
 					name: 'pointer_down',
-					...getPointerInfo(editor, e),
+					...getPointerInfo(editor, e, { viewportId: eventViewportId }),
 					isPenDirect,
 				})
 			}
 
 			function onPointerUp(e: React.PointerEvent) {
 				if (editor.wasEventAlreadyHandled(e)) return
+				const owner =
+					activePointerOwner?.pointerId === e.pointerId && activePointerOwner.editor === editor
+						? activePointerOwner
+						: undefined
 				const button = isSecondaryClickPointerDown ? 2 : getPointerEventButton(e)
 				if (button !== 0 && button !== 1 && button !== 2 && button !== 5) return
 
@@ -70,7 +87,12 @@ export function useCanvasEvents() {
 					type: 'pointer',
 					target: 'canvas',
 					name: 'pointer_up',
-					...getPointerInfo(editor, e),
+					...getPointerInfo(editor, e, {
+						viewportId:
+							owner && owner.viewportId !== DEFAULT_VIEWPORT_ID
+								? owner.viewportId
+								: eventViewportId,
+					}),
 					button,
 				})
 
@@ -89,6 +111,13 @@ export function useCanvasEvents() {
 					e.currentTarget.dispatchEvent(contextMenuEvent)
 				}
 				isSecondaryClickPointerDown = false
+				if (activePointerOwner?.pointerId === e.pointerId) activePointerOwner = undefined
+			}
+
+			function onPointerCancel(e: React.PointerEvent) {
+				if (activePointerOwner?.pointerId === e.pointerId && activePointerOwner.editor === editor) {
+					activePointerOwner = undefined
+				}
 			}
 
 			function onPointerEnter(e: React.PointerEvent) {
@@ -139,7 +168,10 @@ export function useCanvasEvents() {
 				preventDefault(e)
 				e.stopPropagation()
 
-				const pagePoint = editor.screenToPage({ x: e.clientX, y: e.clientY })
+				const pagePoint = editor.screenToPage(
+					{ x: e.clientX, y: e.clientY },
+					{ viewportId: eventViewportId }
+				)
 
 				// Call the custom onDropOnCanvas callback if provided
 				if (editor.options.experimental__onDropOnCanvas) {
@@ -199,6 +231,7 @@ export function useCanvasEvents() {
 			return {
 				onPointerDown,
 				onPointerUp,
+				onPointerCancel,
 				onPointerEnter,
 				onPointerLeave,
 				onDragOver,
@@ -209,7 +242,7 @@ export function useCanvasEvents() {
 				onContextMenu,
 			}
 		},
-		[editor]
+		[editor, eventViewportId, viewportId]
 	)
 
 	// onPointerMove is special: where we're only interested in the other events when they're
@@ -221,6 +254,11 @@ export function useCanvasEvents() {
 		let lastX: number, lastY: number
 
 		function onPointerMove(e: PointerEvent) {
+			const owner = activePointerOwner
+			if (owner && owner.editor !== editor) return
+			if (owner && owner.pointerId !== e.pointerId) return
+			if (owner && owner.viewportId !== viewportId) return
+			if (!owner && !isDefaultViewport) return
 			if (editor.wasEventAlreadyHandled(e)) return
 			editor.markEventAsHandled(e)
 
@@ -244,7 +282,12 @@ export function useCanvasEvents() {
 					type: 'pointer',
 					target: 'canvas',
 					name: 'pointer_move',
-					...getPointerInfo(editor, singleEvent),
+					...getPointerInfo(editor, singleEvent, {
+						viewportId:
+							owner && owner.viewportId !== DEFAULT_VIEWPORT_ID
+								? owner.viewportId
+								: eventViewportId,
+					}),
 				})
 			}
 		}
@@ -253,7 +296,7 @@ export function useCanvasEvents() {
 		return () => {
 			ownerDocument.body.removeEventListener('pointermove', onPointerMove)
 		}
-	}, [editor, currentTool, ownerDocument])
+	}, [editor, currentTool, eventViewportId, ownerDocument, isDefaultViewport, viewportId])
 
 	return events
 }

@@ -1,6 +1,7 @@
 import { TLHandle, TLShape, VecModel } from '@tldraw/tlschema'
 import { VecLike } from '../../primitives/Vec'
 import { TLOverlay } from '../overlays/OverlayUtil'
+import { TLViewportId } from '../viewports/TLViewport'
 import { TLSelectionHandle } from './selection-types'
 
 /** @public */
@@ -52,6 +53,7 @@ export interface TLBaseEventInfo {
 	ctrlKey: boolean
 	metaKey: boolean
 	accelKey: boolean
+	viewportId?: TLViewportId
 }
 
 /** @public */

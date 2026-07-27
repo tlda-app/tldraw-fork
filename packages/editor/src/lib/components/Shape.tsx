@@ -31,6 +31,7 @@ export const Shape = memo(function Shape({
 	index,
 	backgroundIndex,
 	opacity,
+	initialIsCulled,
 }: {
 	id: TLShapeId
 	shape: TLShape
@@ -38,6 +39,7 @@ export const Shape = memo(function Shape({
 	index: number
 	backgroundIndex: number
 	opacity: number
+	initialIsCulled?: boolean
 }) {
 	const editor = useEditor()
 
@@ -128,13 +130,13 @@ export const Shape = memo(function Shape({
 		if (!container) return
 
 		// Check initial culling state and register with the context
-		const isCulled = editor.getCulledShapes().has(id)
+		const isCulled = initialIsCulled ?? editor.getCulledShapes().has(id)
 		register(id, container, bgContainerRef.current, isCulled)
 
 		return () => {
 			unregister(id)
 		}
-	}, [editor, id, register, unregister])
+	}, [editor, id, initialIsCulled, register, unregister])
 	const annotateError = useCallback(
 		(error: any) => editor.annotateError(error, { origin: 'shape', willCrashApp: false }),
 		[editor]

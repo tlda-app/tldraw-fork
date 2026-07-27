@@ -147,7 +147,7 @@ import { ReadonlySharedStyleMap, SharedStyle, SharedStyleMap } from '../utils/Sh
 import { AssetUtil } from './assets/AssetUtil'
 import { BindingOnDeleteOptions, BindingUtil } from './bindings/BindingUtil'
 import { bindingsIndex } from './derivations/bindingsIndex'
-import { notVisibleShapes } from './derivations/notVisibleShapes'
+import { getNotVisibleShapesForViewport, notVisibleShapes } from './derivations/notVisibleShapes'
 import { parentsToChildren } from './derivations/parentsToChildren'
 import { deriveShapeIdsInCurrentPage } from './derivations/shapeIdsInCurrentPage'
 import { ClickManager } from './managers/ClickManager/ClickManager'
@@ -193,6 +193,13 @@ import {
 	TLUpdatePointerOptions,
 } from './types/misc-types'
 import { TLAdjacentDirection, TLResizeHandle } from './types/selection-types'
+import {
+	DEFAULT_VIEWPORT_ID,
+	TLViewport,
+	TLViewportId,
+	TLViewportOptions,
+	getViewportPageBounds,
+} from './viewports/TLViewport'
 
 /** @public */
 export type TLResizeShapeOptions = Partial<{
@@ -4135,6 +4142,66 @@ export class Editor extends EventEmitter<TLEventMap> {
 	/** @internal */
 	private _willSetInitialBounds = true
 
+	/** @internal */
+	private _viewports = atom('viewports', new Map<TLViewportId, TLViewport>())
+
+	/** @public */
+	registerViewport(viewport: TLViewport) {
+		this.updateViewport(viewport.id, viewport)
+		return () => {
+			const viewports = new Map(this._viewports.get())
+			viewports.delete(viewport.id)
+			this._viewports.set(viewports)
+		}
+	}
+
+	/** @public */
+	updateViewport(id: TLViewportId, patch: Partial<TLViewport>): this {
+		if (id === DEFAULT_VIEWPORT_ID) {
+			throw new Error(
+				'Use updateViewportScreenBounds and setCamera to update the default viewport.'
+			)
+		}
+
+		const prev = this._viewports.get().get(id)
+		const next = {
+			...prev,
+			...patch,
+			id,
+			pageId: patch.pageId ?? prev?.pageId ?? this.getCurrentPageId(),
+		}
+
+		if (!next.screenBounds || !next.camera) {
+			throw new Error('A viewport must have screenBounds and camera.')
+		}
+
+		const viewports = new Map(this._viewports.get())
+		viewports.set(id, next as TLViewport)
+		this._viewports.set(viewports)
+		return this
+	}
+
+	/** @public */
+	getViewport(id: TLViewportId = DEFAULT_VIEWPORT_ID): TLViewport {
+		if (id === DEFAULT_VIEWPORT_ID) {
+			return {
+				id: DEFAULT_VIEWPORT_ID,
+				pageId: this.getCurrentPageId(),
+				screenBounds: this.getViewportScreenBounds().toJson(),
+				camera: this.getCamera(),
+			}
+		}
+
+		const viewport = this._viewports.get().get(id)
+		if (!viewport) throw new Error(`No viewport registered with id "${id}".`)
+		return viewport
+	}
+
+	/** @internal */
+	private _resolveViewport(opts?: TLViewportOptions) {
+		return opts?.viewport ?? this.getViewport(opts?.viewportId)
+	}
+
 	/**
 	 * Update the viewport. The viewport will measure the size and screen position of its container
 	 * element. This should be done whenever the container's position on the screen changes.
@@ -4238,7 +4305,11 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 *
 	 * @public
 	 */
-	@computed getViewportPageBounds() {
+	getViewportPageBounds(opts?: TLViewportOptions) {
+		if (opts?.viewport || (opts?.viewportId && opts.viewportId !== DEFAULT_VIEWPORT_ID)) {
+			return getViewportPageBounds(this._resolveViewport(opts))
+		}
+
 		const { w, h } = this.getViewportScreenBounds()
 		const { x: cx, y: cy, z: cz } = this.getCamera()
 		return new Box(-cx, -cy, w / cz, h / cz)
@@ -4253,12 +4324,18 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 * ```
 	 *
 	 * @param point - The point in screen space.
+	 * @param opts - Options for using a registered viewport.
 	 *
 	 * @public
 	 */
-	screenToPage(point: VecLike) {
-		const { screenBounds } = this.store.unsafeGetWithoutCapture(TLINSTANCE_ID)!
-		const { x: cx, y: cy, z: cz = 1 } = this.getCamera()
+	screenToPage(point: VecLike, opts?: TLViewportOptions) {
+		const viewport =
+			opts?.viewport || (opts?.viewportId && opts.viewportId !== DEFAULT_VIEWPORT_ID)
+				? this._resolveViewport(opts)
+				: null
+		const screenBounds =
+			viewport?.screenBounds ?? this.store.unsafeGetWithoutCapture(TLINSTANCE_ID)!.screenBounds
+		const { x: cx, y: cy, z: cz = 1 } = viewport?.camera ?? this.getCamera()
 		return new Vec(
 			(point.x - screenBounds.x) / cz - cx,
 			(point.y - screenBounds.y) / cz - cy,
@@ -4275,12 +4352,18 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 * ```
 	 *
 	 * @param point - The point in page space.
+	 * @param opts - Options for using a registered viewport.
 	 *
 	 * @public
 	 */
-	pageToScreen(point: VecLike) {
-		const { screenBounds } = this.store.unsafeGetWithoutCapture(TLINSTANCE_ID)!
-		const { x: cx, y: cy, z: cz = 1 } = this.getCamera()
+	pageToScreen(point: VecLike, opts?: TLViewportOptions) {
+		const viewport =
+			opts?.viewport || (opts?.viewportId && opts.viewportId !== DEFAULT_VIEWPORT_ID)
+				? this._resolveViewport(opts)
+				: null
+		const screenBounds =
+			viewport?.screenBounds ?? this.store.unsafeGetWithoutCapture(TLINSTANCE_ID)!.screenBounds
+		const { x: cx, y: cy, z: cz = 1 } = viewport?.camera ?? this.getCamera()
 		return new Vec(
 			(point.x + cx) * cz + screenBounds.x,
 			(point.y + cy) * cz + screenBounds.y,
@@ -4620,7 +4703,8 @@ export class Editor extends EventEmitter<TLEventMap> {
 		// The rendering state. We use this method both for rendering, which
 		// is based on other state, and for computing order for SVG export,
 		// which should work even when things are for example off-screen.
-		useEditorState: boolean
+		useEditorState: boolean,
+		opts?: TLViewportOptions
 	): TLRenderingShape[] {
 		// Here we get the shape as well as any of its children, as well as their
 		// opacities. If the shape is being erased, and none of its ancestors are
@@ -4638,8 +4722,10 @@ export class Editor extends EventEmitter<TLEventMap> {
 		let nextBackgroundIndex = this.options.maxShapesPerPage
 
 		const erasingShapeIds = this.getErasingShapeIds()
+		const culledShapeIds = useEditorState ? this.getCulledShapes(opts) : null
 
 		const addShapeById = (id: TLShapeId, opacity: number, isAncestorErasing: boolean) => {
+			if (culledShapeIds?.has(id)) return
 			const shape = this.getShape(id)
 			if (!shape) return
 
@@ -4757,8 +4843,8 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 *
 	 * @public
 	 */
-	@computed getRenderingShapes() {
-		const renderingShapes = this.getUnorderedRenderingShapes(true)
+	getRenderingShapes(opts?: TLViewportOptions) {
+		const renderingShapes = this.getUnorderedRenderingShapes(true, opts)
 
 		// Its IMPORTANT that the result be sorted by id AND include the index
 		// that the shape should be displayed at. Steve, this is the past you
@@ -5721,9 +5807,17 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 *
 	 * @public
 	 */
-	@computed
-	getCulledShapes() {
-		const notVisibleShapes = this.getNotVisibleShapes()
+	getCulledShapes(opts?: TLViewportOptions) {
+		const isCustomViewport =
+			opts?.viewport || (opts?.viewportId && opts.viewportId !== DEFAULT_VIEWPORT_ID)
+		const viewport =
+			opts?.viewport ?? (isCustomViewport ? this._viewports.get().get(opts.viewportId!) : null)
+		if (isCustomViewport && !viewport) {
+			return new Set<TLShapeId>()
+		}
+		const notVisibleShapes = viewport
+			? getNotVisibleShapesForViewport(this, viewport)
+			: this.getNotVisibleShapes()
 		const selectedShapeIds = this.getSelectedShapeIds()
 		const editingId = this.getEditingShapeId()
 		const nextValue = new Set<TLShapeId>(notVisibleShapes)
@@ -5738,6 +5832,10 @@ export class Editor extends EventEmitter<TLEventMap> {
 
 		// Cache optimization: return same Set object if contents unchanged
 		// This allows consumers to use === comparison and prevents unnecessary re-renders
+		if (opts?.viewport || (opts?.viewportId && opts.viewportId !== DEFAULT_VIEWPORT_ID)) {
+			return nextValue
+		}
+
 		const prevValue = this._culledShapesCache
 		if (prevValue) {
 			// If sizes differ, contents must differ

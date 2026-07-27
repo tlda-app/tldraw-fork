@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { TLWheelEventInfo } from '../editor/types/event-types'
+import { TLViewportId } from '../editor/viewports/TLViewport'
 import { tlenv } from '../globals/environment'
 import { Vec } from '../primitives/Vec'
 import { preventDefault } from '../utils/dom'
@@ -53,8 +54,12 @@ interface GestureEvent extends Event {
 	ctrlKey: boolean
 }
 
-export function useGestureEvents(ref: React.RefObject<HTMLDivElement | null>) {
+export function useGestureEvents(
+	ref: React.RefObject<HTMLDivElement | null>,
+	opts?: { viewportId?: TLViewportId }
+) {
 	const editor = useEditor()
+	const viewportId = opts?.viewportId
 
 	React.useEffect(() => {
 		const elm = ref.current
@@ -102,6 +107,7 @@ export function useGestureEvents(ref: React.RefObject<HTMLDivElement | null>) {
 				ctrlKey: event.metaKey || event.ctrlKey,
 				metaKey: event.metaKey,
 				accelKey: isAccelKey(event),
+				viewportId,
 			}
 
 			editor.dispatch(info)
@@ -193,6 +199,7 @@ export function useGestureEvents(ref: React.RefObject<HTMLDivElement | null>) {
 				ctrlKey: event.metaKey || event.ctrlKey,
 				metaKey: event.metaKey,
 				accelKey: isAccelKey(event),
+				viewportId,
 			})
 		}
 
@@ -397,5 +404,5 @@ export function useGestureEvents(ref: React.RefObject<HTMLDivElement | null>) {
 				elm.removeEventListener('touchcancel', onTouchEnd)
 			}
 		}
-	}, [editor, ref])
+	}, [editor, ref, viewportId])
 }
