@@ -4722,7 +4722,7 @@ export class Editor extends EventEmitter<TLEventMap> {
 		let nextBackgroundIndex = this.options.maxShapesPerPage
 
 		const erasingShapeIds = this.getErasingShapeIds()
-		const culledShapeIds = useEditorState ? this.getCulledShapes(opts) : null
+		const culledShapeIds = useEditorState && !opts?.disableCulling ? this.getCulledShapes(opts) : null
 
 		const addShapeById = (id: TLShapeId, opacity: number, isAncestorErasing: boolean) => {
 			if (culledShapeIds?.has(id)) return
@@ -5808,6 +5808,9 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 * @public
 	 */
 	getCulledShapes(opts?: TLViewportOptions) {
+		if (opts?.disableCulling) {
+			return new Set<TLShapeId>()
+		}
 		const isCustomViewport =
 			opts?.viewport || (opts?.viewportId && opts.viewportId !== DEFAULT_VIEWPORT_ID)
 		const viewport =
