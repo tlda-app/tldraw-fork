@@ -7,6 +7,7 @@ import {
 	TlaCommentThread,
 	TlaFile,
 	TlaFileState,
+	TlaFileVisitor,
 	TlaGroup,
 	TlaGroupFile,
 	TlaGroupUser,
@@ -185,6 +186,9 @@ export interface ZStoreData {
 	// Same as comment: never populated by the legacy polyfill store, present only for the
 	// generic CRUD types.
 	comment_mention?: TlaCommentMention[]
+	// Same as comment: the viewer roster is served via the proper-Zero synced query (fileVisitors),
+	// never populated by the legacy polyfill store; present only for the generic CRUD types.
+	file_visitor?: TlaFileVisitor[]
 	lsn: string
 }
 
@@ -205,6 +209,7 @@ export interface ZRowDeleteOrUpdate {
 export type ZTable =
 	| 'file'
 	| 'file_state'
+	| 'file_visitor'
 	| 'user'
 	| 'group'
 	| 'group_user'

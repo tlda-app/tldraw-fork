@@ -131,8 +131,6 @@ function makeFileState(
 		lastVisitAt: null,
 		isFileOwner: false,
 		isPinned: false,
-		userName: null,
-		userColor: null,
 		...overrides,
 	}
 }
