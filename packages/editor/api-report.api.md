@@ -695,6 +695,9 @@ export const DEFAULT_CAMERA_OPTIONS: TLCameraOptions;
 export const DEFAULT_THEME: TLTheme;
 
 // @public (undocumented)
+export const DEFAULT_VIEWPORT_ID: TLViewportId;
+
+// @public (undocumented)
 export function DefaultBackground(): JSX.Element;
 
 // @public (undocumented)
@@ -1306,7 +1309,7 @@ export class Editor extends EventEmitter<TLEventMap> {
     // @internal
     getCrashingError(): unknown;
     getCroppingShapeId(): null | TLShapeId;
-    getCulledShapes(): Set<TLShapeId>;
+    getCulledShapes(opts?: TLViewportOptions): Set<TLShapeId>;
     getCurrentPage(): TLPage;
     getCurrentPageBounds(): Box | undefined;
     getCurrentPageId(): TLPageId;
@@ -1360,7 +1363,7 @@ export class Editor extends EventEmitter<TLEventMap> {
     getPointInShapeSpace(shape: TLShape | TLShapeId, point: VecLike): Vec;
     // @internal
     _getReferencedUserIds(shapes: TLShape[]): Set<string>;
-    getRenderingShapes(): TLRenderingShape[];
+    getRenderingShapes(opts?: TLViewportOptions): TLRenderingShape[];
     getResizeScaleFactor(): number;
     // @internal
     getResizeShapePartial(shape: TLShape | TLShapeId, scale: VecLike, opts?: TLResizeShapeOptions): null | TLShapePartial;
@@ -1433,8 +1436,10 @@ export class Editor extends EventEmitter<TLEventMap> {
     getTheme(id: TLThemeId): TLTheme | undefined;
     getThemes(): TLThemes;
     // @internal (undocumented)
-    getUnorderedRenderingShapes(useEditorState: boolean): TLRenderingShape[];
-    getViewportPageBounds(): Box;
+    getUnorderedRenderingShapes(useEditorState: boolean, opts?: TLViewportOptions): TLRenderingShape[];
+    // (undocumented)
+    getViewport(id?: TLViewportId): TLViewport;
+    getViewportPageBounds(opts?: TLViewportOptions): Box;
     getViewportScreenBounds(): Box;
     getViewportScreenCenter(): Vec;
     getVisibleCollaborators(): TLInstancePresence[];
@@ -1514,7 +1519,7 @@ export class Editor extends EventEmitter<TLEventMap> {
     readonly options: TldrawOptions;
     readonly overlays: OverlayManager;
     packShapes(shapes: TLShape[] | TLShapeId[], _gap?: number): this;
-    pageToScreen(point: VecLike): Vec;
+    pageToScreen(point: VecLike, opts?: TLViewportOptions): Vec;
     pageToViewport(point: VecLike): Vec;
     readonly performance: PerformanceManager;
     popFocusedGroupId(): this;
@@ -1535,6 +1540,8 @@ export class Editor extends EventEmitter<TLEventMap> {
     registerExternalContentHandler<T extends TLExternalContent<E>['type'], E>(type: T, handler: ((info: T extends TLExternalContent<E>['type'] ? Extract<TLExternalContent<E>, {
         type: T;
     }> : TLExternalContent<E>) => void) | null): this;
+    // (undocumented)
+    registerViewport(viewport: TLViewport): () => void;
     removeTool(Tool: TLStateNodeConstructor, parent?: StateNode): void;
     renamePage(page: TLPage | TLPageId, name: string): this;
     reparentShapes(shapes: TLShape[] | TLShapeId[], parentId: TLParentId, insertIndex?: IndexKey): this;
@@ -1557,7 +1564,7 @@ export class Editor extends EventEmitter<TLEventMap> {
         center?: VecLike;
     }): this;
     run(fn: () => void, opts?: TLEditorRunOptions): this;
-    screenToPage(point: VecLike): Vec;
+    screenToPage(point: VecLike, opts?: TLViewportOptions): Vec;
     readonly scribbles: ScribbleManager;
     select(...shapes: TLShape[] | TLShapeId[]): this;
     selectAdjacentShape(direction: TLAdjacentDirection): void;
@@ -1666,6 +1673,8 @@ export class Editor extends EventEmitter<TLEventMap> {
     _updateShapes(_partials: (null | TLShapePartial | undefined)[]): void;
     updateTheme(theme: TLTheme): this;
     updateThemes(themes: ((themes: TLThemes) => TLThemes) | TLThemes): this;
+    // (undocumented)
+    updateViewport(id: TLViewportId, patch: Partial<TLViewport>): this;
     updateViewportScreenBounds(screenBounds: Box | HTMLElement, center?: boolean): this;
     uploadAsset(asset: TLAsset, file: File, abortSignal?: AbortSignal): Promise<{
         meta?: JsonObject;
@@ -1976,7 +1985,9 @@ export function getPerfectDashProps(totalLength: number, strokeWidth: number, op
 };
 
 // @public (undocumented)
-export function getPointerInfo(editor: Editor, e: PointerEvent | React_3.PointerEvent): {
+export function getPointerInfo(editor: Editor, e: PointerEvent | React_3.PointerEvent, opts?: {
+    viewportId?: TLViewportId;
+}): {
     accelKey: boolean;
     altKey: boolean;
     button: number;
@@ -1990,6 +2001,7 @@ export function getPointerInfo(editor: Editor, e: PointerEvent | React_3.Pointer
     };
     pointerId: number;
     shiftKey: boolean;
+    viewportId: string | undefined;
 };
 
 // @public
@@ -2030,6 +2042,9 @@ export function getUserPreferences(): TLUserPreferences;
 
 // @internal (undocumented)
 export function getVerticesCountForArcLength(length: number, spacing?: number): number;
+
+// @public (undocumented)
+export function getViewportPageBounds(viewport: Pick<TLViewport, 'camera' | 'screenBounds'>): Box;
 
 // @public (undocumented)
 export class Group2d extends Geometry2d {
@@ -3458,6 +3473,8 @@ export interface TLBaseEventInfo {
     shiftKey: boolean;
     // (undocumented)
     type: UiEventType;
+    // (undocumented)
+    viewportId?: TLViewportId;
 }
 
 // @public (undocumented)
@@ -3869,6 +3886,27 @@ export interface TldrawOptions {
     // (undocumented)
     readonly uiDragDistanceSquared: number;
     readonly zoomToFitPadding: number;
+}
+
+// @public (undocumented)
+export function TldrawViewport({ id, camera, pageId, className, disableCulling, shapePredicate, onCameraChange }: TldrawViewportProps): JSX.Element;
+
+// @public (undocumented)
+export interface TldrawViewportProps {
+    // (undocumented)
+    camera: TLViewport['camera'];
+    // (undocumented)
+    className?: string;
+    // (undocumented)
+    disableCulling?: boolean;
+    // (undocumented)
+    id: TLViewportId;
+    // (undocumented)
+    onCameraChange?(camera: TLViewport['camera']): void;
+    // (undocumented)
+    pageId?: TLViewport['pageId'];
+    // (undocumented)
+    shapePredicate?(shape: TLShape): boolean;
 }
 
 // @public (undocumented)
@@ -4915,6 +4953,31 @@ export interface TLUserPreferences {
     locale?: null | string;
     // (undocumented)
     name?: null | string;
+}
+
+// @public (undocumented)
+export interface TLViewport {
+    // (undocumented)
+    camera: Pick<TLCamera, 'x' | 'y' | 'z'>;
+    // (undocumented)
+    id: TLViewportId;
+    // (undocumented)
+    pageId?: TLPageId;
+    // (undocumented)
+    screenBounds: BoxModel;
+}
+
+// @public (undocumented)
+export type TLViewportId = string;
+
+// @public (undocumented)
+export interface TLViewportOptions {
+    // (undocumented)
+    disableCulling?: boolean;
+    // (undocumented)
+    viewport?: TLViewport;
+    // (undocumented)
+    viewportId?: TLViewportId;
 }
 
 // @public (undocumented)
