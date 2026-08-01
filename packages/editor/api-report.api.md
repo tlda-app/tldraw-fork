@@ -692,6 +692,9 @@ export const DEFAULT_ANIMATION_OPTIONS: {
 export const DEFAULT_CAMERA_OPTIONS: TLCameraOptions;
 
 // @public
+export const DEFAULT_GESTURE_TUNING: TLGestureTuning;
+
+// @public
 export const DEFAULT_THEME: TLTheme;
 
 // @public (undocumented)
@@ -1923,6 +1926,21 @@ export interface Geometry2dOptions extends TransformedGeometry2dOptions {
     isClosed: boolean;
     // (undocumented)
     isFilled: boolean;
+}
+
+// @public (undocumented)
+export class GestureInterpreter {
+    constructor(tuning?: Partial<TLGestureTuning>);
+    end(): {
+        ms: number;
+        scale: number;
+    } | null;
+    // (undocumented)
+    getCount(): number;
+    // (undocumented)
+    getKind(): TLGestureKind;
+    isDeflating(): boolean;
+    update(points: readonly TLGesturePoint[], time: number): TLGestureFrame;
 }
 
 // @public
@@ -4225,6 +4243,50 @@ export interface TLFramePerfEvent {
 // @public
 export interface TLGeometryOpts {
     context?: string;
+}
+
+// @public
+export interface TLGestureFrame {
+    count: number;
+    // (undocumented)
+    kind: TLGestureKind;
+    origin: {
+        x: number;
+        y: number;
+    };
+    pan: {
+        x: number;
+        y: number;
+    };
+    scale: number;
+    scaleX: number;
+    // (undocumented)
+    scaleY: number;
+    transitioned: boolean;
+}
+
+// @public
+export type TLGestureKind = 'panning' | 'undecided' | 'zooming';
+
+// @public
+export interface TLGesturePoint {
+    // (undocumented)
+    id: number;
+    // (undocumented)
+    x: number;
+    // (undocumented)
+    y: number;
+}
+
+// @public (undocumented)
+export interface TLGestureTuning {
+    decay: number;
+    decideRatio: number;
+    deflateMs: number;
+    deflateWithin: number;
+    minAxisSpread: number;
+    minMotion: number;
+    stealRatio: number;
 }
 
 // @public

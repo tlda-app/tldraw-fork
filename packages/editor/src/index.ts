@@ -300,6 +300,14 @@ export {
 export { useColorMode } from './lib/hooks/useColorMode'
 export { getCursor } from './lib/hooks/useCursor'
 export {
+	DEFAULT_GESTURE_TUNING,
+	GestureInterpreter,
+	type TLGestureFrame,
+	type TLGestureKind,
+	type TLGesturePoint,
+	type TLGestureTuning,
+} from './lib/hooks/gesture/GestureInterpreter'
+export {
 	EditorContext,
 	EditorProvider,
 	useEditor,

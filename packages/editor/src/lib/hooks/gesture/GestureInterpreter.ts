@@ -53,17 +53,29 @@ finger lands. There is nothing for a window to buy.
 
 */
 
-/** How the fingers are being read right now. Only `zooming` applies scale. */
+/**
+ * How the fingers are being read right now. Only `zooming` applies scale.
+ *
+ * @public
+ */
 export type TLGestureKind = 'undecided' | 'panning' | 'zooming'
 
-/** One live touch, keyed by the identifier the platform assigns it. */
+/**
+ * One live touch, keyed by the identifier the platform assigns it.
+ *
+ * @public
+ */
 export interface TLGesturePoint {
 	id: number
 	x: number
 	y: number
 }
 
-/** What the owner should apply this frame. Deltas, never absolutes. */
+/**
+ * What the owner should apply this frame. Deltas, never absolutes.
+ *
+ * @public
+ */
 export interface TLGestureFrame {
 	kind: TLGestureKind
 	/** How many fingers are down. Revised as they arrive and leave. */
@@ -74,10 +86,21 @@ export interface TLGestureFrame {
 	pan: { x: number; y: number }
 	/** Multiplicative scale change since the previous frame, deflation included. */
 	scale: number
+	/**
+	 * The same scale change resolved per axis, for targets that can be scaled
+	 * anisotropically. A camera has one `z` and uses `scale`; a window has a width
+	 * and a height and uses these. Same reading of the same fingers either way —
+	 * the anisotropy is in what the target can express, not in how the gesture is
+	 * classified. An axis the fingers barely span carries no usable signal, so it
+	 * falls back to `scale` rather than amplifying noise.
+	 */
+	scaleX: number
+	scaleY: number
 	/** Current centroid, in the same client coordinates as the points. */
 	origin: { x: number; y: number }
 }
 
+/** @public */
 export interface TLGestureTuning {
 	/**
 	 * Per-frame decay of the motion accumulators — how fast the classifier
@@ -102,6 +125,12 @@ export interface TLGestureTuning {
 	deflateWithin: number
 	/** How long a given-back zoom takes to return. Slow enough to read as a correction. */
 	deflateMs: number
+	/**
+	 * An axis the fingers span by less than this carries no usable scale signal:
+	 * two fingers side by side say nothing about height. Below it, that axis
+	 * follows the overall scale instead.
+	 */
+	minAxisSpread: number
 }
 
 /**
@@ -110,6 +139,8 @@ export interface TLGestureTuning {
  * `deflateMs` are picked by feel, which the spec for this work explicitly
  * permits: the error is bounded by the quantity that triggers the decision, so
  * being wrong about a small zoom costs a small zoom.
+ *
+ * @public
  */
 export const DEFAULT_GESTURE_TUNING: TLGestureTuning = {
 	decay: 0.8,
@@ -118,6 +149,7 @@ export const DEFAULT_GESTURE_TUNING: TLGestureTuning = {
 	stealRatio: 2,
 	deflateWithin: 1.08,
 	deflateMs: 260,
+	minAxisSpread: 8,
 }
 
 /** Centroid of the live points. */
@@ -133,16 +165,23 @@ function centroidOf(points: readonly TLGesturePoint[]) {
 
 /**
  * How far apart the fingers are, defined for any number of them: twice the mean
- * distance from the centroid. For two fingers that is exactly the distance
- * between them, so tldraw's thresholds keep the meaning they were tuned with.
+ * distance from the centroid, and the same again along each axis. For two
+ * fingers `d` is exactly the distance between them and `x`/`y` are exactly the
+ * sides of the box they span, so tldraw's thresholds keep the meaning they were
+ * tuned with and so do tlda's.
  */
 function spreadOf(points: readonly TLGesturePoint[], centroid: { x: number; y: number }) {
-	if (points.length < 2) return 0
-	let total = 0
+	if (points.length < 2) return { d: 0, x: 0, y: 0 }
+	let d = 0
+	let x = 0
+	let y = 0
 	for (const p of points) {
-		total += Math.hypot(p.x - centroid.x, p.y - centroid.y)
+		d += Math.hypot(p.x - centroid.x, p.y - centroid.y)
+		x += Math.abs(p.x - centroid.x)
+		y += Math.abs(p.y - centroid.y)
 	}
-	return (2 * total) / points.length
+	const n = points.length / 2
+	return { d: d / n, x: x / n, y: y / n }
 }
 
 function keyOf(points: readonly TLGesturePoint[]) {
@@ -153,6 +192,7 @@ function keyOf(points: readonly TLGesturePoint[]) {
 		.join(',')
 }
 
+/** @public */
 export class GestureInterpreter {
 	private tuning: TLGestureTuning
 
@@ -160,7 +200,7 @@ export class GestureInterpreter {
 	private pointKey = ''
 	private count = 0
 	private centroid = { x: 0, y: 0 }
-	private spread = 0
+	private spread = { d: 0, x: 0, y: 0 }
 
 	/** Decayed recent motion. These, not totals since the start, decide the kind. */
 	private recentTravel = 0
@@ -209,8 +249,16 @@ export class GestureInterpreter {
 
 		const dx = pointsChanged ? 0 : centroid.x - this.centroid.x
 		const dy = pointsChanged ? 0 : centroid.y - this.centroid.y
-		const dSpread = pointsChanged ? 0 : spread - this.spread
-		const frameScale = pointsChanged || this.spread <= 0 ? 1 : spread / this.spread
+		const dSpread = pointsChanged ? 0 : spread.d - this.spread.d
+
+		const ratio = (now: number, before: number) =>
+			pointsChanged || before < this.tuning.minAxisSpread ? 1 : now / before
+		const frameScale = ratio(spread.d, this.spread.d)
+		// An axis with too little to say follows the overall scale.
+		const frameScaleX =
+			this.spread.x < this.tuning.minAxisSpread ? frameScale : ratio(spread.x, this.spread.x)
+		const frameScaleY =
+			this.spread.y < this.tuning.minAxisSpread ? frameScale : ratio(spread.y, this.spread.y)
 
 		const decay = this.tuning.decay
 		this.recentTravel = this.recentTravel * decay + Math.hypot(dx, dy)
@@ -236,12 +284,21 @@ export class GestureInterpreter {
 		// Panning is applied as soon as there is anything to apply, including while
 		// undecided. Scale waits until the gesture has said it is a zoom.
 		const pan = transitioned ? { x: 0, y: 0 } : { x: dx, y: dy }
-		let scale = transitioned || this.kind !== 'zooming' ? 1 : frameScale
+		const scaling = !transitioned && this.kind === 'zooming'
+		let scale = scaling ? frameScale : 1
+		let scaleX = scaling ? frameScaleX : 1
+		let scaleY = scaling ? frameScaleY : 1
 		if (this.kind === 'zooming') this.episodeScale *= scale
 
-		scale *= this.deflationStep(time)
+		// The give-back is folded into the frame rather than animated separately,
+		// so it composes with whatever the fingers are doing now instead of
+		// fighting them for the same value. Isotropic: what was given was a size.
+		const step = this.deflationStep(time)
+		scale *= step
+		scaleX *= step
+		scaleY *= step
 
-		return { kind: this.kind, count, transitioned, pan, scale, origin: centroid }
+		return { kind: this.kind, count, transitioned, pan, scale, scaleX, scaleY, origin: centroid }
 	}
 
 	/**
@@ -261,7 +318,7 @@ export class GestureInterpreter {
 		this.kind = 'undecided'
 		this.pointKey = ''
 		this.count = 0
-		this.spread = 0
+		this.spread = { d: 0, x: 0, y: 0 }
 		this.recentTravel = 0
 		this.recentSpread = 0
 		this.episodeScale = 1
