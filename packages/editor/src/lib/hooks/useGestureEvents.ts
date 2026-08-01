@@ -6,6 +6,7 @@ import { Vec } from '../primitives/Vec'
 import { preventDefault } from '../utils/dom'
 import { isAccelKey } from '../utils/keyboard'
 import { normalizeWheel } from '../utils/normalizeWheel'
+import { GestureInterpreter, TLGesturePoint } from './gesture/GestureInterpreter'
 import { useEditor } from './useEditor'
 
 /*
@@ -20,26 +21,20 @@ The pinching handler is fired under two circumstances:
 Zooming is much more expensive than panning (because it causes shapes to render),
 so we want to be sure that we don't zoom while two-finger panning.
 
-In order to do this, we keep track of a "pinchState", which is either:
-- "zooming"
-- "panning"
-- "not sure"
+A trackpad pinch says what it is: a `gesturechange` event is a zoom and nothing
+else, so that path below zooms directly.
 
-If a user is on a trackpad, the pinchState will be set to "zooming".
+Fingers do not. Reading them is `GestureInterpreter`, which is told about every
+touch that arrives, moves and leaves, and answers with what to apply this frame.
+It can change its mind — a pinch that turns out to be a pan gives the zoom back
+if the zoom was small enough to have been a finger settling — and it reports pan
+deltas from the first frame, so a pan never waits to be recognised. See the file
+for why it is shaped that way.
 
-If the user is on a touch screen, then we start in the "not sure" state and switch back and forth
-between "zooming", "panning", and "not sure" based on what the user is doing with their fingers.
+Everything it returns is a per-frame delta, and on the frame where its reading
+changes the deltas are zero. So changing what a gesture means, or how many
+fingers it has, cannot make the camera jump.
 
-In the "not sure" state, we examine whether the user has moved the center of the gesture far enough
-to suggest that they're panning; or else that they've moved their fingers further apart or closer
-together enough to suggest that they're zooming.
-
-In the "panning" state, we check whether the user's fingers have moved far enough apart to suggest
-that they're zooming. If they have, we switch to the "zooming" state.
-
-In the "zooming" state, we just stay zooming—it's not YET possible to switch back to panning.
-
-todo: compare velocities of change in order to determine whether the user has switched back to panning
 */
 
 /** Safari's non-standard GestureEvent */
@@ -65,16 +60,12 @@ export function useGestureEvents(
 		const elm = ref.current
 		if (!elm) return
 
-		let pinchState = 'not sure' as 'not sure' | 'zooming' | 'panning'
-
 		// --- Wheel handling ---
 
 		function onWheel(event: WheelEvent) {
 			if (!editor.getInstanceState().isFocused) {
 				return
 			}
-
-			pinchState = 'not sure'
 
 			// Don't handle wheel events over a scrollable editing shape
 			const editingShapeId = editor.getEditingShapeId()
@@ -113,16 +104,17 @@ export function useGestureEvents(
 			editor.dispatch(info)
 		}
 
-		// --- Touch pinch handling ---
+		// --- Pinch state shared by both input paths ---
 
-		let initDistanceBetweenFingers = 1 // the distance between the two fingers when the pinch starts
-		let initZoom = 1 // the zoom level when the pinch starts
-		let currDistanceBetweenFingers = 0
-		const initPointBetweenFingers = new Vec()
 		const prevPointBetweenFingers = new Vec()
 
-		// Track active touches
-		let activeTouches: Touch[] = []
+		/**
+		 * The zoom level in scale space, accumulated multiplicatively and clamped to
+		 * the camera's bounds. Multiplicative rather than measured from the start of
+		 * the gesture, because the interpreter re-baselines whenever its reading
+		 * changes and there is then no "start" left to measure from.
+		 */
+		let scaleOffset = 1
 
 		function getScaleBounds() {
 			const baseZoom = editor.getBaseZoom()
@@ -140,46 +132,10 @@ export function useGestureEvents(
 			return editor.getZoomLevel() ** (1 / zoomSpeed)
 		}
 
-		// Accumulated scale offset, clamped to bounds — replaces @use-gesture's offset[0]
-		let scaleOffset = 1
-		let initScaleFrom = 1 // the scale-space zoom level when the pinch started
-
-		function updatePinchState(isSafariTrackpadPinch: boolean) {
-			if (isSafariTrackpadPinch) {
-				pinchState = 'zooming'
-			}
-
-			if (pinchState === 'zooming') {
-				return
-			}
-
-			// Initial: [touch]-------origin-------[touch]
-			// Current: [touch]-----------origin----------[touch]
-			//                          |----|     |------------|
-			//             originDistance ^           ^ touchDistance
-
-			// How far have the two touch points moved towards or away from each other?
-			const touchDistance = Math.abs(currDistanceBetweenFingers - initDistanceBetweenFingers)
-			// How far has the point between the touches moved?
-			const originDistance = Vec.Dist(initPointBetweenFingers, prevPointBetweenFingers)
-
-			switch (pinchState) {
-				case 'not sure': {
-					if (touchDistance > 24) {
-						pinchState = 'zooming'
-					} else if (originDistance > 16) {
-						pinchState = 'panning'
-					}
-					break
-				}
-				case 'panning': {
-					// Slightly more touch distance needed to go from panning to zooming
-					if (touchDistance > 64) {
-						pinchState = 'zooming'
-					}
-					break
-				}
-			}
+		function applyScale(factor: number) {
+			const bounds = getScaleBounds()
+			scaleOffset = Math.min(bounds.max, Math.max(bounds.min, scaleOffset * factor))
+			return scaleOffset ** editor.getCameraOptions().zoomSpeed
 		}
 
 		function dispatchPinchEvent(
@@ -203,94 +159,120 @@ export function useGestureEvents(
 			})
 		}
 
-		function getOriginAndDistance(t0: Touch, t1: Touch) {
-			const origin = {
-				x: (t0.clientX + t1.clientX) / 2,
-				y: (t0.clientY + t1.clientY) / 2,
+		// --- Touch pinch handling ---
+
+		const interpreter = new GestureInterpreter()
+		let isPinching = false
+		/** Bumped to abandon an in-flight give-back when the user touches again. */
+		let deflationId = 0
+
+		function touchPoints(event: TouchEvent): TLGesturePoint[] {
+			return Array.from(event.touches).map((t) => ({
+				id: t.identifier,
+				x: t.clientX,
+				y: t.clientY,
+			}))
+		}
+
+		/**
+		 * Hand back a zoom the interpreter judged accidental, over `ms`, by going on
+		 * dispatching pinch frames after the fingers have left. Reusing the pinch
+		 * path means the give-back zooms about the same point the gesture did,
+		 * rather than reimplementing that math against the camera.
+		 */
+		function deflate(
+			owed: { scale: number; ms: number },
+			origin: { x: number; y: number },
+			event: TouchEvent
+		) {
+			const id = ++deflationId
+			const from = scaleOffset
+			const to = scaleOffset * owed.scale
+			let startedAt = -1
+
+			const step = (now: number) => {
+				if (id !== deflationId) return // the user started something else
+				if (startedAt < 0) startedAt = now
+
+				const t = Math.min(1, (now - startedAt) / owed.ms)
+				// Eased at both ends, so it reads as the application correcting itself
+				// rather than as a second thing going wrong.
+				const eased = t * t * (3 - 2 * t)
+				scaleOffset = from * Math.pow(to / from, eased)
+				const zoom = scaleOffset ** editor.getCameraOptions().zoomSpeed
+
+				if (t < 1) {
+					dispatchPinchEvent('pinch', origin, { x: 0, y: 0 }, zoom, event)
+					editor.timers.requestAnimationFrame(step)
+					return
+				}
+
+				isPinching = false
+				dispatchPinchEvent('pinch_end', origin, origin, zoom, event)
 			}
-			const distance = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
-			return { origin, distance }
+
+			editor.timers.requestAnimationFrame(step)
+		}
+
+		function endPinch(event: TouchEvent) {
+			const origin = { x: prevPointBetweenFingers.x, y: prevPointBetweenFingers.y }
+			const owed = interpreter.end()
+
+			if (owed) {
+				deflate(owed, origin, event)
+				return
+			}
+
+			isPinching = false
+			const zoom = scaleOffset ** editor.getCameraOptions().zoomSpeed
+			editor.timers.requestAnimationFrame(() => {
+				dispatchPinchEvent('pinch_end', origin, origin, zoom, event)
+			})
+		}
+
+		/**
+		 * Every touch event goes through here. A finger arriving or leaving is a
+		 * change to the gesture rather than the end of one, so there is no separate
+		 * start or end handler deciding anything.
+		 */
+		function handleTouches(event: TouchEvent) {
+			const frame = interpreter.update(touchPoints(event), event.timeStamp)
+
+			if (frame.count < 2) {
+				// Leave the origin at the last point the fingers actually pinched about,
+				// which is where a give-back should zoom about too.
+				if (isPinching) endPinch(event)
+				return
+			}
+
+			prevPointBetweenFingers.x = frame.origin.x
+			prevPointBetweenFingers.y = frame.origin.y
+
+			if (!isPinching) {
+				deflationId++ // abandon any give-back still running
+				isPinching = true
+				scaleOffset = getScaleFrom()
+				dispatchPinchEvent(
+					'pinch_start',
+					frame.origin,
+					{ x: 0, y: 0 },
+					editor.getZoomLevel(),
+					event
+				)
+				return
+			}
+
+			dispatchPinchEvent('pinch', frame.origin, frame.pan, applyScale(frame.scale), event)
 		}
 
 		function onTouchStart(event: TouchEvent) {
 			if (!(event.target === elm || elm?.contains(event.target as Node))) return
-
-			activeTouches = Array.from(event.touches)
-
-			if (activeTouches.length === 2) {
-				// Two fingers down — start pinch
-				pinchState = 'not sure'
-				const { origin, distance } = getOriginAndDistance(activeTouches[0], activeTouches[1])
-
-				prevPointBetweenFingers.x = origin.x
-				prevPointBetweenFingers.y = origin.y
-				initPointBetweenFingers.x = origin.x
-				initPointBetweenFingers.y = origin.y
-				initDistanceBetweenFingers = Math.max(distance, 1)
-				currDistanceBetweenFingers = distance
-				initZoom = editor.getZoomLevel()
-				initScaleFrom = getScaleFrom()
-				scaleOffset = initScaleFrom
-
-				dispatchPinchEvent('pinch_start', origin, { x: 0, y: 0 }, editor.getZoomLevel(), event)
-			}
-		}
-
-		function onTouchMove(event: TouchEvent) {
-			activeTouches = Array.from(event.touches)
-
-			if (activeTouches.length < 2) return
-
-			const { origin, distance } = getOriginAndDistance(activeTouches[0], activeTouches[1])
-			currDistanceBetweenFingers = distance
-
-			const dx = origin.x - prevPointBetweenFingers.x
-			const dy = origin.y - prevPointBetweenFingers.y
-
-			prevPointBetweenFingers.x = origin.x
-			prevPointBetweenFingers.y = origin.y
-
-			updatePinchState(false)
-
-			// Only update the zoom if the pointers are far enough apart;
-			// a very small touchDistance means that the user has probably
-			// pinched out and their fingers are touching; this produces
-			// very unstable zooming behavior.
-			const bounds = getScaleBounds()
-			const rawScale = initScaleFrom * (distance / initDistanceBetweenFingers)
-			scaleOffset = Math.min(bounds.max, Math.max(bounds.min, rawScale))
-
-			switch (pinchState) {
-				case 'zooming': {
-					const currZoom = scaleOffset ** editor.getCameraOptions().zoomSpeed
-					dispatchPinchEvent('pinch', origin, { x: dx, y: dy }, currZoom, event)
-					break
-				}
-				case 'panning': {
-					dispatchPinchEvent('pinch', origin, { x: dx, y: dy }, initZoom, event)
-					break
-				}
-			}
-		}
-
-		function onTouchEnd(event: TouchEvent) {
-			const wasPinching = activeTouches.length >= 2
-			activeTouches = Array.from(event.touches)
-
-			if (wasPinching && activeTouches.length < 2) {
-				// Pinch ended
-				const scale = scaleOffset ** editor.getCameraOptions().zoomSpeed
-				const origin = { ...prevPointBetweenFingers }
-				pinchState = 'not sure'
-
-				editor.timers.requestAnimationFrame(() => {
-					dispatchPinchEvent('pinch_end', origin, { x: origin.x, y: origin.y }, scale, event)
-				})
-			}
+			handleTouches(event)
 		}
 
 		// --- Safari trackpad pinch (GestureEvent) ---
 
+		/** `GestureEvent.scale` is relative to the start of the gesture, so is this. */
 		let safariGestureInitialScale = 1
 
 		function onGestureStart(event: Event) {
@@ -300,17 +282,12 @@ export function useGestureEvents(
 			preventDefault(e)
 			e.stopPropagation()
 
-			pinchState = 'not sure'
+			deflationId++
 			safariGestureInitialScale = getScaleFrom()
 			scaleOffset = safariGestureInitialScale
-			initZoom = editor.getZoomLevel()
 
 			prevPointBetweenFingers.x = e.clientX
 			prevPointBetweenFingers.y = e.clientY
-			initPointBetweenFingers.x = e.clientX
-			initPointBetweenFingers.y = e.clientY
-			initDistanceBetweenFingers = 1
-			currDistanceBetweenFingers = 1
 
 			dispatchPinchEvent(
 				'pinch_start',
@@ -334,16 +311,11 @@ export function useGestureEvents(
 			prevPointBetweenFingers.x = e.clientX
 			prevPointBetweenFingers.y = e.clientY
 
-			// Safari GestureEvent.scale is a multiplier relative to gesture start
+			// Safari GestureEvent.scale is a multiplier relative to the gesture start,
+			// so the absolute it implies is the reference scale times it.
 			const bounds = getScaleBounds()
 			const rawScale = safariGestureInitialScale * e.scale
 			scaleOffset = Math.min(bounds.max, Math.max(bounds.min, rawScale))
-
-			// Update distance tracking for pinch state (treat scale change as distance change)
-			currDistanceBetweenFingers = e.scale * initDistanceBetweenFingers
-
-			updatePinchState(true)
-
 			const currZoom = scaleOffset ** editor.getCameraOptions().zoomSpeed
 
 			dispatchPinchEvent('pinch', { x: e.clientX, y: e.clientY }, { x: dx, y: dy }, currZoom, e)
@@ -357,7 +329,6 @@ export function useGestureEvents(
 			e.stopPropagation()
 
 			const scale = scaleOffset ** editor.getCameraOptions().zoomSpeed
-			pinchState = 'not sure'
 
 			editor.timers.requestAnimationFrame(() => {
 				dispatchPinchEvent(
@@ -386,12 +357,13 @@ export function useGestureEvents(
 			elm.addEventListener('gestureend', onGestureEnd)
 		} else {
 			elm.addEventListener('touchstart', onTouchStart)
-			elm.addEventListener('touchmove', onTouchMove)
-			elm.addEventListener('touchend', onTouchEnd)
-			elm.addEventListener('touchcancel', onTouchEnd)
+			elm.addEventListener('touchmove', handleTouches)
+			elm.addEventListener('touchend', handleTouches)
+			elm.addEventListener('touchcancel', handleTouches)
 		}
 
 		return () => {
+			deflationId++
 			elm.removeEventListener('wheel', onWheel)
 			if (useGestureEvents) {
 				elm.removeEventListener('gesturestart', onGestureStart)
@@ -399,9 +371,9 @@ export function useGestureEvents(
 				elm.removeEventListener('gestureend', onGestureEnd)
 			} else {
 				elm.removeEventListener('touchstart', onTouchStart)
-				elm.removeEventListener('touchmove', onTouchMove)
-				elm.removeEventListener('touchend', onTouchEnd)
-				elm.removeEventListener('touchcancel', onTouchEnd)
+				elm.removeEventListener('touchmove', handleTouches)
+				elm.removeEventListener('touchend', handleTouches)
+				elm.removeEventListener('touchcancel', handleTouches)
 			}
 		}
 	}, [editor, ref, viewportId])
