@@ -51,6 +51,31 @@ finger gesture necessarily passes through two fingers, but during those few tens
 of milliseconds it is already panning, and it goes on panning when the third
 finger lands. There is nothing for a window to buy.
 
+## The give-back never fires, and that is deliberate
+
+Question two has a mechanism — `owedScale`, `deflationStep` and the factor `end`
+returns — and in practice nothing ever reaches it. Driving this classifier over
+288 synthetic streams (splay 0.5–8px per frame over 2–20 frames, then a pan at
+4–30px per frame) produced nothing owed back in any of them. The band is closed
+from both sides:
+
+  - Below it, scale is withheld while `undecided`, so a splay small enough to
+    have been a finger settling applies exactly 1, and `onLeavingKind` returns
+    on `episode === 1`. Nothing was applied, so nothing is owed.
+  - Above it, `stealRatio` holds `zooming` for the few frames a pan needs to
+    build enough travel to take the gesture, and the episode compounds past
+    `deflateWithin` on the way. The tightest episode constructible here applied
+    1.0874, against a threshold of 1.08.
+
+That is prevention instead of restoration, which is the position UIKit takes and
+the strongest one in the prior art: if the wrong owner never acts, there is
+nothing to put back. Withholding scale until the gesture has said it is a zoom
+already buys what the give-back was written to repair.
+
+So do not widen `deflateWithin` or loosen `stealRatio` to make the give-back
+fire. It is unreachable on purpose, and the reason it is safe to be unreachable
+is that those two numbers are where they are.
+
 */
 
 /**
