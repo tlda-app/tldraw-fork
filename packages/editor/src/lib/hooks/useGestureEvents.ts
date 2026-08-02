@@ -1,7 +1,6 @@
 import * as React from 'react'
 import { TLWheelEventInfo } from '../editor/types/event-types'
 import { TLViewportId } from '../editor/viewports/TLViewport'
-import { tlenv } from '../globals/environment'
 import { Vec } from '../primitives/Vec'
 import { preventDefault } from '../utils/dom'
 import { isAccelKey } from '../utils/keyboard'
@@ -393,11 +392,35 @@ export function useGestureEvents(
 
 		elm.addEventListener('wheel', onWheel, { passive: false })
 
-		// On touch devices (iOS), use pointer events for pinch.
-		// On non-touch Safari (macOS trackpad), use GestureEvent.
-		// Never use both simultaneously — on iOS Safari, both event types fire
-		// for the same pinch gesture, causing conflicting state updates.
-		const useGestureEvents = !tlenv.isIos && 'GestureEvent' in window
+		// On a touch device, read the touches. On non-touch Safari (macOS trackpad),
+		// use GestureEvent. Never both — Safari fires both for the same pinch, and
+		// two handlers driving one camera is the conflict this branch exists to stop.
+		//
+		// The test used to be `!tlenv.isIos`, and that is the bug an iPad exposes:
+		// iPadOS Safari presents itself as a Mac, so `isIos` is false, so an iPad
+		// took the trackpad branch. The touch listeners were then never registered,
+		// `GestureInterpreter` never saw a single finger, and the camera was driven
+		// straight from `GestureEvent.scale` with no pan-or-zoom decision anywhere.
+		// That is why a two-finger drag zoomed: on that path, nothing ever asks.
+		//
+		// Ask about the input instead of the operating system. A trackpad reports no
+		// touch points; a screen you can put fingers on reports some.
+		const hasTouchScreen =
+			(typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) ||
+			(typeof window !== 'undefined' && 'ontouchstart' in window)
+		const useGestureEvents = !hasTouchScreen && 'GestureEvent' in window
+
+		// Belt and braces for the case the branch above is still wrong somewhere:
+		// count fingers at the document, so `activeTouches` is true even when our own
+		// touch listeners are not the ones registered. Whether a finger is on the
+		// glass is a property of the screen, not of which element was hit.
+		const countTouches = (e: Event) => {
+			activeTouches = (e as TouchEvent).touches.length
+		}
+		const touchCountOpts = { capture: true, passive: true } as AddEventListenerOptions
+		for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+			document.addEventListener(name, countTouches, touchCountOpts)
+		}
 
 		if (useGestureEvents) {
 			elm.addEventListener('gesturestart', onGestureStart)
@@ -413,6 +436,9 @@ export function useGestureEvents(
 		return () => {
 			deflationId++
 			elm.removeEventListener('wheel', onWheel)
+			for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+				document.removeEventListener(name, countTouches, touchCountOpts)
+			}
 			if (useGestureEvents) {
 				elm.removeEventListener('gesturestart', onGestureStart)
 				elm.removeEventListener('gesturechange', onGestureChange)
