@@ -164,55 +164,6 @@ export function useGestureEvents(
 		const interpreter = new GestureInterpreter()
 		let isPinching = false
 
-		// TEMPORARY. Records what the camera has against what it is being handed,
-		// every frame, and posts the gesture in one payload on release. This lives
-		// in the fork because the app's own gesture code sits behind an `expanded`
-		// guard and does not run on a plain document page. Remove once the flick is
-		// located.
-		let trace: Array<Record<string, unknown>> = []
-		function traceFrame(phase: string, handedZ: number, extra: Record<string, unknown> = {}) {
-			try {
-				const cam = editor.getCamera()
-				trace.push({
-					phase,
-					camZ: Number(cam.z.toPrecision(12)),
-					handedZ: Number(handedZ.toPrecision(12)),
-					deltaZ: Number((handedZ - cam.z).toPrecision(6)),
-					camX: Number(cam.x.toFixed(2)),
-					camY: Number(cam.y.toFixed(2)),
-					...extra,
-				})
-			} catch {
-				trace.push({ phase, error: true })
-			}
-		}
-		function flushTrace(why: string) {
-			if (!trace.length) return
-			const payload = trace
-			trace = []
-			try {
-				const zs = payload.map((p) => p.camZ as number).filter((v) => typeof v === 'number')
-				const body = JSON.stringify({
-					ts: new Date().toISOString(),
-					level: 'warn',
-					ns: 'fork-pinch-trace',
-					msg: 'fork pinch trace',
-					data: {
-						why,
-						frames: payload.length,
-						camZFirst: zs[0],
-						camZLast: zs[zs.length - 1],
-						camZMin: Math.min(...zs),
-						camZMax: Math.max(...zs),
-						maxAbsDeltaZ: Math.max(...payload.map((p) => Math.abs((p.deltaZ as number) || 0))),
-						trace: payload,
-					},
-				})
-				navigator.sendBeacon?.('/api/log', new Blob([body], { type: 'application/json' }))
-			} catch {
-				// never let instrumentation affect the gesture
-			}
-		}
 		/** Bumped to abandon an in-flight give-back when the user touches again. */
 		let deflationId = 0
 
@@ -275,13 +226,8 @@ export function useGestureEvents(
 
 			isPinching = false
 			const zoom = scaleOffset ** editor.getCameraOptions().zoomSpeed
-			traceFrame('pinch_end', zoom, { owed: owed ? 'yes' : 'no' })
 			editor.timers.requestAnimationFrame(() => {
 				dispatchPinchEvent('pinch_end', origin, { x: 0, y: 0 }, zoom, event)
-				editor.timers.setTimeout(() => {
-					traceFrame('settled+250ms', zoom)
-					flushTrace('pinch_end')
-				}, 250)
 			})
 		}
 
@@ -291,6 +237,7 @@ export function useGestureEvents(
 		 * start or end handler deciding anything.
 		 */
 		function handleTouches(event: TouchEvent) {
+			activeTouches = event.touches.length
 			const frame = interpreter.update(touchPoints(event), event.timeStamp)
 
 			if (frame.count < 2) {
@@ -307,14 +254,6 @@ export function useGestureEvents(
 				deflationId++ // abandon any give-back still running
 				isPinching = true
 				scaleOffset = getScaleFrom()
-				traceFrame('pinch_start', editor.getZoomLevel(), {
-					n: frame.count,
-					kind: frame.kind,
-					origX: Number(frame.origin.x.toFixed(1)),
-					origY: Number(frame.origin.y.toFixed(1)),
-					bounds: getScaleBounds(),
-					scaleOffset: Number(scaleOffset.toPrecision(12)),
-				})
 				dispatchPinchEvent(
 					'pinch_start',
 					frame.origin,
@@ -341,16 +280,6 @@ export function useGestureEvents(
 				zoom = editor.getZoomLevel()
 			}
 
-			traceFrame('pinch', zoom, {
-				n: frame.count,
-				kind: frame.kind,
-				transitioned: frame.transitioned,
-				panX: Number(frame.pan.x.toFixed(2)),
-				panY: Number(frame.pan.y.toFixed(2)),
-				scale: Number(frame.scale.toPrecision(8)),
-				origX: Number(frame.origin.x.toFixed(1)),
-				origY: Number(frame.origin.y.toFixed(1)),
-			})
 			dispatchPinchEvent('pinch', frame.origin, frame.pan, zoom, event)
 		}
 
@@ -364,12 +293,34 @@ export function useGestureEvents(
 		/** `GestureEvent.scale` is relative to the start of the gesture, so is this. */
 		let safariGestureInitialScale = 1
 
+		/**
+		 * Whether fingers are on the glass right now.
+		 *
+		 * The comment at the top of this file says a `gesturechange` is a zoom and
+		 * nothing else. That is true of a trackpad and false of iPadOS, which fires
+		 * the same events for a two-finger touch gesture — interleaved with the
+		 * touchmoves, one pair per frame. Recorded on a real iPad: 204 GestureEvents
+		 * across a single drag, every one carrying a `scale` that merely reflects how
+		 * the finger spread happened to change, and `onGestureChange` zooming the
+		 * camera from it with no classification in the way. One drag went 1.66 to
+		 * 4.75. It also explains why nothing in `GestureInterpreter` could affect it:
+		 * the touch path was never the one running.
+		 *
+		 * So the GestureEvent path is for a trackpad, and a trackpad has no touches.
+		 * While any finger is down, the touch path owns the gesture.
+		 */
+		let activeTouches = 0
+
 		function onGestureStart(event: Event) {
 			const e = event as GestureEvent
 			if (!(e.target === elm || elm?.contains(e.target as Node))) return
 
 			preventDefault(e)
 			e.stopPropagation()
+
+			// Fingers own this gesture; the touch path is already reading it. Still
+			// swallow the event so Safari does not page-zoom on top of us.
+			if (activeTouches > 0) return
 
 			deflationId++
 			safariGestureInitialScale = getScaleFrom()
@@ -394,6 +345,10 @@ export function useGestureEvents(
 			preventDefault(e)
 			e.stopPropagation()
 
+			// Fingers own this gesture; the touch path is already reading it. Still
+			// swallow the event so Safari does not page-zoom on top of us.
+			if (activeTouches > 0) return
+
 			const dx = e.clientX - prevPointBetweenFingers.x
 			const dy = e.clientY - prevPointBetweenFingers.y
 
@@ -416,6 +371,10 @@ export function useGestureEvents(
 
 			preventDefault(e)
 			e.stopPropagation()
+
+			// Fingers own this gesture; the touch path is already reading it. Still
+			// swallow the event so Safari does not page-zoom on top of us.
+			if (activeTouches > 0) return
 
 			const scale = scaleOffset ** editor.getCameraOptions().zoomSpeed
 
