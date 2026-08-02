@@ -51,30 +51,33 @@ finger gesture necessarily passes through two fingers, but during those few tens
 of milliseconds it is already panning, and it goes on panning when the third
 finger lands. There is nothing for a window to buy.
 
-## The give-back never fires, and that is deliberate
+## The give-back is what stops a drag from zooming
 
-Question two has a mechanism — `owedScale`, `deflationStep` and the factor `end`
-returns — and in practice nothing ever reaches it. Driving this classifier over
-288 synthetic streams (splay 0.5–8px per frame over 2–20 frames, then a pan at
-4–30px per frame) produced nothing owed back in any of them. The band is closed
-from both sides:
+Fingers landing on glass splay before they settle, and that splay is spread with
+no travel yet to argue against it — so the reading is `zooming` for a few frames
+before the drag reveals itself. Scale is applied during those frames. Then the
+hand moves, the reading corrects to `panning`, and the zoom it already applied
+just stays.
 
-  - Below it, scale is withheld while `undecided`, so a splay small enough to
-    have been a finger settling applies exactly 1, and `onLeavingKind` returns
-    on `episode === 1`. Nothing was applied, so nothing is owed.
-  - Above it, `stealRatio` holds `zooming` for the few frames a pan needs to
-    build enough travel to take the gesture, and the episode compounds past
-    `deflateWithin` on the way. The tightest episode constructible here applied
-    1.0874, against a threshold of 1.08.
+That is the whole bug, and it is not small. A drag preceded by 40px of splay
+lands 1.24x; by 120px, 1.57x. With three fingers, where the mean distance from
+the centroid moves much more freely than the gap between two, it reaches 2x.
+The classification ends up correct and the camera ends up wrong, which is why
+this survived a test that only checked the final reading.
 
-That is prevention instead of restoration, which is the position UIKit takes and
-the strongest one in the prior art: if the wrong owner never acts, there is
-nothing to put back. Withholding scale until the gesture has said it is a zoom
-already buys what the give-back was written to repair.
+So the episode has to be returned, and `deflateWithin` is what decides that. It
+was 1.08, which meant anything past 8% was read as deliberate — i.e. every real
+misfire was kept. At 2 the misfires go back and a genuine pinch, which runs well
+past 2x, is still kept.
 
-So do not widen `deflateWithin` or loosen `stealRatio` to make the give-back
-fire. It is unreachable on purpose, and the reason it is safe to be unreachable
-is that those two numbers are where they are.
+The error is bounded by the quantity that triggers it, which is why a threshold
+picked by feel is defensible here: get it wrong about a small zoom and you have
+returned a small zoom. Do not replace this with an intent classifier.
+
+Prevention would be better than restoration — the prior art is unanimous — but
+prevention here means withholding scale until the reading is sure, and the
+reading cannot be sure before the evidence exists. That is the whole reason this
+classifier revises. Restoration is the part that makes revising safe.
 
 */
 
@@ -172,7 +175,7 @@ export const DEFAULT_GESTURE_TUNING: TLGestureTuning = {
 	minMotion: 2,
 	decideRatio: 1.2,
 	stealRatio: 2,
-	deflateWithin: 1.08,
+	deflateWithin: 2,
 	deflateMs: 260,
 	minAxisSpread: 8,
 }
