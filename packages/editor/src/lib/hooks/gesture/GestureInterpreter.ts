@@ -335,7 +335,12 @@ export class GestureInterpreter {
 	 * spread it across.
 	 */
 	end(): { scale: number; ms: number } | null {
-		this.onLeavingKind(this.kind, this.lastTime)
+		// Deliberately NOT asking whether the current episode should be given back.
+		// That question belongs to a change of reading, not to the end of a gesture:
+		// lifting your fingers is not changing your mind. Asking it here undoes a
+		// pinch you meant, which is the one thing a size you set on purpose must
+		// never suffer. Anything still owed from a reclassification earlier in the
+		// gesture is returned, since there are no more frames to spread it over.
 		const owed = this.owedScale
 		this.reset()
 		if (owed === 1) return null
