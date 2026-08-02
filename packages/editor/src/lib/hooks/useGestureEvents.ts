@@ -163,6 +163,56 @@ export function useGestureEvents(
 
 		const interpreter = new GestureInterpreter()
 		let isPinching = false
+
+		// TEMPORARY. Records what the camera has against what it is being handed,
+		// every frame, and posts the gesture in one payload on release. This lives
+		// in the fork because the app's own gesture code sits behind an `expanded`
+		// guard and does not run on a plain document page. Remove once the flick is
+		// located.
+		let trace: Array<Record<string, unknown>> = []
+		function traceFrame(phase: string, handedZ: number, extra: Record<string, unknown> = {}) {
+			try {
+				const cam = editor.getCamera()
+				trace.push({
+					phase,
+					camZ: Number(cam.z.toPrecision(12)),
+					handedZ: Number(handedZ.toPrecision(12)),
+					deltaZ: Number((handedZ - cam.z).toPrecision(6)),
+					camX: Number(cam.x.toFixed(2)),
+					camY: Number(cam.y.toFixed(2)),
+					...extra,
+				})
+			} catch {
+				trace.push({ phase, error: true })
+			}
+		}
+		function flushTrace(why: string) {
+			if (!trace.length) return
+			const payload = trace
+			trace = []
+			try {
+				const zs = payload.map((p) => p.camZ as number).filter((v) => typeof v === 'number')
+				const body = JSON.stringify({
+					ts: new Date().toISOString(),
+					level: 'warn',
+					ns: 'fork-pinch-trace',
+					msg: 'fork pinch trace',
+					data: {
+						why,
+						frames: payload.length,
+						camZFirst: zs[0],
+						camZLast: zs[zs.length - 1],
+						camZMin: Math.min(...zs),
+						camZMax: Math.max(...zs),
+						maxAbsDeltaZ: Math.max(...payload.map((p) => Math.abs((p.deltaZ as number) || 0))),
+						trace: payload,
+					},
+				})
+				navigator.sendBeacon?.('/api/log', new Blob([body], { type: 'application/json' }))
+			} catch {
+				// never let instrumentation affect the gesture
+			}
+		}
 		/** Bumped to abandon an in-flight give-back when the user touches again. */
 		let deflationId = 0
 
@@ -208,7 +258,7 @@ export function useGestureEvents(
 				}
 
 				isPinching = false
-				dispatchPinchEvent('pinch_end', origin, origin, zoom, event)
+				dispatchPinchEvent('pinch_end', origin, { x: 0, y: 0 }, zoom, event)
 			}
 
 			editor.timers.requestAnimationFrame(step)
@@ -225,8 +275,13 @@ export function useGestureEvents(
 
 			isPinching = false
 			const zoom = scaleOffset ** editor.getCameraOptions().zoomSpeed
+			traceFrame('pinch_end', zoom, { owed: owed ? 'yes' : 'no' })
 			editor.timers.requestAnimationFrame(() => {
-				dispatchPinchEvent('pinch_end', origin, origin, zoom, event)
+				dispatchPinchEvent('pinch_end', origin, { x: 0, y: 0 }, zoom, event)
+				editor.timers.setTimeout(() => {
+					traceFrame('settled+250ms', zoom)
+					flushTrace('pinch_end')
+				}, 250)
 			})
 		}
 
@@ -252,6 +307,14 @@ export function useGestureEvents(
 				deflationId++ // abandon any give-back still running
 				isPinching = true
 				scaleOffset = getScaleFrom()
+				traceFrame('pinch_start', editor.getZoomLevel(), {
+					n: frame.count,
+					kind: frame.kind,
+					origX: Number(frame.origin.x.toFixed(1)),
+					origY: Number(frame.origin.y.toFixed(1)),
+					bounds: getScaleBounds(),
+					scaleOffset: Number(scaleOffset.toPrecision(12)),
+				})
 				dispatchPinchEvent(
 					'pinch_start',
 					frame.origin,
@@ -262,7 +325,33 @@ export function useGestureEvents(
 				return
 			}
 
-			dispatchPinchEvent('pinch', frame.origin, frame.pan, applyScale(frame.scale), event)
+			// A gesture that is not a zoom must hand back the zoom the camera already
+			// has, exactly. The camera update zooms about the gesture origin —
+			// `- x/cz + x/z` — so those terms cancel only when `z` is byte-identical
+			// to the camera's own `z`. Anything else, including a scale accumulator
+			// that is merely close, turns a moving origin into a visible flick, and
+			// the origin moves furthest at exactly the moment a third finger lands.
+			// So while panning, read the live camera rather than the accumulator, and
+			// keep the accumulator in step for when a zoom does start.
+			let zoom: number
+			if (frame.kind === 'zooming') {
+				zoom = applyScale(frame.scale)
+			} else {
+				scaleOffset = getScaleFrom()
+				zoom = editor.getZoomLevel()
+			}
+
+			traceFrame('pinch', zoom, {
+				n: frame.count,
+				kind: frame.kind,
+				transitioned: frame.transitioned,
+				panX: Number(frame.pan.x.toFixed(2)),
+				panY: Number(frame.pan.y.toFixed(2)),
+				scale: Number(frame.scale.toPrecision(8)),
+				origX: Number(frame.origin.x.toFixed(1)),
+				origY: Number(frame.origin.y.toFixed(1)),
+			})
+			dispatchPinchEvent('pinch', frame.origin, frame.pan, zoom, event)
 		}
 
 		function onTouchStart(event: TouchEvent) {
