@@ -112,9 +112,14 @@ export function TldrawViewport({
 
 			const delta = normalizeWheel(event.nativeEvent)
 			if (!event.ctrlKey && !event.metaKey) {
+				// Add the normalized delta, the way Editor.ts's 'wheel' case does
+				// (`cx + (dx * panSpeed) / cz`). normalizeWheel has already negated
+				// the raw event — it returns `{ x: -deltaX, y: -deltaY }` — so
+				// subtracting here negated a second time and this viewport panned
+				// opposite to the main canvas for the same gesture.
 				onCameraChange({
-					x: camera.x - delta.x / camera.z,
-					y: camera.y - delta.y / camera.z,
+					x: camera.x + delta.x / camera.z,
+					y: camera.y + delta.y / camera.z,
 					z: camera.z,
 				})
 				return
