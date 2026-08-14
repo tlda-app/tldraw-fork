@@ -138,9 +138,15 @@ export function TldrawViewport({
 		[camera, onCameraChange]
 	)
 
-	const shouldPanWithTouch = useCallback(
+	const shouldPanWithDirectPointer = useCallback(
 		(event: PointerEvent) => {
-			if (!onCameraChange || event.pointerType !== 'touch' || !event.isPrimary) return false
+			if (
+				!onCameraChange ||
+				(event.pointerType !== 'touch' && event.pointerType !== 'pen') ||
+				!event.isPrimary
+			) {
+				return false
+			}
 			const toolId = editor.getCurrentToolId()
 			return toolId === 'select' || toolId === 'hand'
 		},
@@ -149,7 +155,7 @@ export function TldrawViewport({
 
 	const onPointerDown = useCallback(
 		(event: PointerEvent<HTMLDivElement>) => {
-			if (!shouldPanWithTouch(event)) {
+			if (!shouldPanWithDirectPointer(event)) {
 				events.onPointerDown?.(event)
 				return
 			}
@@ -164,7 +170,7 @@ export function TldrawViewport({
 				camera,
 			}
 		},
-		[camera, events, shouldPanWithTouch]
+		[camera, events, shouldPanWithDirectPointer]
 	)
 
 	const onPointerMove = useCallback(
