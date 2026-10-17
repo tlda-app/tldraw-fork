@@ -1,0 +1,260 @@
+import * as React from "react";
+import { Vec } from "../primitives/Vec.mjs";
+import { preventDefault } from "../utils/dom.mjs";
+import { isAccelKey } from "../utils/keyboard.mjs";
+import { normalizeWheel } from "../utils/normalizeWheel.mjs";
+import { GestureInterpreter } from "./gesture/GestureInterpreter.mjs";
+import { useEditor } from "./useEditor.mjs";
+function useGestureEvents(ref, opts) {
+  const editor = useEditor();
+  const viewportId = opts?.viewportId;
+  React.useEffect(() => {
+    const elm = ref.current;
+    if (!elm) return;
+    function onWheel(event) {
+      if (!editor.getInstanceState().isFocused) {
+        return;
+      }
+      const editingShapeId = editor.getEditingShapeId();
+      if (editingShapeId) {
+        const shape = editor.getShape(editingShapeId);
+        if (shape) {
+          const util = editor.getShapeUtil(shape);
+          if (util.canScroll(shape)) {
+            const bounds = editor.getShapePageBounds(editingShapeId);
+            if (bounds?.containsPoint(editor.inputs.getCurrentPagePoint())) {
+              return;
+            }
+          }
+        }
+      }
+      preventDefault(event);
+      event.stopPropagation();
+      const delta = normalizeWheel(event);
+      if (delta.x === 0 && delta.y === 0) return;
+      const info = {
+        type: "wheel",
+        name: "wheel",
+        delta,
+        point: new Vec(event.clientX, event.clientY),
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        ctrlKey: event.metaKey || event.ctrlKey,
+        metaKey: event.metaKey,
+        accelKey: isAccelKey(event),
+        viewportId
+      };
+      editor.dispatch(info);
+    }
+    const prevPointBetweenFingers = new Vec();
+    let scaleOffset = 1;
+    function getScaleBounds() {
+      const baseZoom = editor.getBaseZoom();
+      const { zoomSteps, zoomSpeed } = editor.getCameraOptions();
+      const zoomMin = zoomSteps[0] * baseZoom;
+      const zoomMax = zoomSteps[zoomSteps.length - 1] * baseZoom;
+      return {
+        min: zoomMin ** (1 / zoomSpeed),
+        max: zoomMax ** (1 / zoomSpeed)
+      };
+    }
+    function getScaleFrom() {
+      const { zoomSpeed } = editor.getCameraOptions();
+      return editor.getZoomLevel() ** (1 / zoomSpeed);
+    }
+    function applyScale(factor) {
+      const bounds = getScaleBounds();
+      scaleOffset = Math.min(bounds.max, Math.max(bounds.min, scaleOffset * factor));
+      return scaleOffset ** editor.getCameraOptions().zoomSpeed;
+    }
+    function dispatchPinchEvent(name, origin, delta, zoom, event) {
+      editor.dispatch({
+        type: "pinch",
+        name,
+        point: { x: origin.x, y: origin.y, z: zoom },
+        delta,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        ctrlKey: event.metaKey || event.ctrlKey,
+        metaKey: event.metaKey,
+        accelKey: isAccelKey(event),
+        viewportId
+      });
+    }
+    const interpreter = new GestureInterpreter();
+    let isPinching = false;
+    let deflationId = 0;
+    function touchPoints(event) {
+      return Array.from(event.touches).map((t) => ({
+        id: t.identifier,
+        x: t.clientX,
+        y: t.clientY
+      }));
+    }
+    function deflate(owed, origin, event) {
+      const id = ++deflationId;
+      const from = scaleOffset;
+      const to = scaleOffset * owed.scale;
+      let startedAt = -1;
+      const step = (now) => {
+        if (id !== deflationId) return;
+        if (startedAt < 0) startedAt = now;
+        const t = Math.min(1, (now - startedAt) / owed.ms);
+        const eased = t * t * (3 - 2 * t);
+        scaleOffset = from * Math.pow(to / from, eased);
+        const zoom = scaleOffset ** editor.getCameraOptions().zoomSpeed;
+        if (t < 1) {
+          dispatchPinchEvent("pinch", origin, { x: 0, y: 0 }, zoom, event);
+          editor.timers.requestAnimationFrame(step);
+          return;
+        }
+        isPinching = false;
+        dispatchPinchEvent("pinch_end", origin, { x: 0, y: 0 }, zoom, event);
+      };
+      editor.timers.requestAnimationFrame(step);
+    }
+    function endPinch(event) {
+      const origin = { x: prevPointBetweenFingers.x, y: prevPointBetweenFingers.y };
+      const owed = interpreter.end();
+      if (owed) {
+        deflate(owed, origin, event);
+        return;
+      }
+      isPinching = false;
+      const zoom = scaleOffset ** editor.getCameraOptions().zoomSpeed;
+      editor.timers.requestAnimationFrame(() => {
+        dispatchPinchEvent("pinch_end", origin, { x: 0, y: 0 }, zoom, event);
+      });
+    }
+    function handleTouches(event) {
+      activeTouches = event.touches.length;
+      const frame = interpreter.update(touchPoints(event), event.timeStamp);
+      if (frame.count < 2) {
+        if (isPinching) endPinch(event);
+        return;
+      }
+      prevPointBetweenFingers.x = frame.origin.x;
+      prevPointBetweenFingers.y = frame.origin.y;
+      if (!isPinching) {
+        deflationId++;
+        isPinching = true;
+        scaleOffset = getScaleFrom();
+        dispatchPinchEvent(
+          "pinch_start",
+          frame.origin,
+          { x: 0, y: 0 },
+          editor.getZoomLevel(),
+          event
+        );
+        return;
+      }
+      let zoom;
+      if (frame.kind === "zooming") {
+        zoom = applyScale(frame.scale);
+      } else {
+        scaleOffset = getScaleFrom();
+        zoom = editor.getZoomLevel();
+      }
+      dispatchPinchEvent("pinch", frame.origin, frame.pan, zoom, event);
+    }
+    function onTouchStart(event) {
+      if (!(event.target === elm || elm?.contains(event.target))) return;
+      handleTouches(event);
+    }
+    let safariGestureInitialScale = 1;
+    let activeTouches = 0;
+    function onGestureStart(event) {
+      const e = event;
+      if (!(e.target === elm || elm?.contains(e.target))) return;
+      preventDefault(e);
+      e.stopPropagation();
+      if (activeTouches > 0) return;
+      deflationId++;
+      safariGestureInitialScale = getScaleFrom();
+      scaleOffset = safariGestureInitialScale;
+      prevPointBetweenFingers.x = e.clientX;
+      prevPointBetweenFingers.y = e.clientY;
+      dispatchPinchEvent(
+        "pinch_start",
+        { x: e.clientX, y: e.clientY },
+        { x: 0, y: 0 },
+        editor.getZoomLevel(),
+        e
+      );
+    }
+    function onGestureChange(event) {
+      const e = event;
+      if (!(e.target === elm || elm?.contains(e.target))) return;
+      preventDefault(e);
+      e.stopPropagation();
+      if (activeTouches > 0) return;
+      const dx = e.clientX - prevPointBetweenFingers.x;
+      const dy = e.clientY - prevPointBetweenFingers.y;
+      prevPointBetweenFingers.x = e.clientX;
+      prevPointBetweenFingers.y = e.clientY;
+      const bounds = getScaleBounds();
+      const rawScale = safariGestureInitialScale * e.scale;
+      scaleOffset = Math.min(bounds.max, Math.max(bounds.min, rawScale));
+      const currZoom = scaleOffset ** editor.getCameraOptions().zoomSpeed;
+      dispatchPinchEvent("pinch", { x: e.clientX, y: e.clientY }, { x: dx, y: dy }, currZoom, e);
+    }
+    function onGestureEnd(event) {
+      const e = event;
+      if (!(e.target === elm || elm?.contains(e.target))) return;
+      preventDefault(e);
+      e.stopPropagation();
+      if (activeTouches > 0) return;
+      const scale = scaleOffset ** editor.getCameraOptions().zoomSpeed;
+      editor.timers.requestAnimationFrame(() => {
+        dispatchPinchEvent(
+          "pinch_end",
+          { x: e.clientX, y: e.clientY },
+          { x: e.clientX, y: e.clientY },
+          scale,
+          e
+        );
+      });
+    }
+    elm.addEventListener("wheel", onWheel, { passive: false });
+    const hasTouchScreen = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0 || typeof window !== "undefined" && "ontouchstart" in window;
+    const useGestureEvents2 = !hasTouchScreen && "GestureEvent" in window;
+    const countTouches = (e) => {
+      activeTouches = e.touches.length;
+    };
+    const touchCountOpts = { capture: true, passive: true };
+    for (const name of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
+      document.addEventListener(name, countTouches, touchCountOpts);
+    }
+    if (useGestureEvents2) {
+      elm.addEventListener("gesturestart", onGestureStart);
+      elm.addEventListener("gesturechange", onGestureChange);
+      elm.addEventListener("gestureend", onGestureEnd);
+    } else {
+      elm.addEventListener("touchstart", onTouchStart);
+      elm.addEventListener("touchmove", handleTouches);
+      elm.addEventListener("touchend", handleTouches);
+      elm.addEventListener("touchcancel", handleTouches);
+    }
+    return () => {
+      deflationId++;
+      elm.removeEventListener("wheel", onWheel);
+      for (const name of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
+        document.removeEventListener(name, countTouches, touchCountOpts);
+      }
+      if (useGestureEvents2) {
+        elm.removeEventListener("gesturestart", onGestureStart);
+        elm.removeEventListener("gesturechange", onGestureChange);
+        elm.removeEventListener("gestureend", onGestureEnd);
+      } else {
+        elm.removeEventListener("touchstart", onTouchStart);
+        elm.removeEventListener("touchmove", handleTouches);
+        elm.removeEventListener("touchend", handleTouches);
+        elm.removeEventListener("touchcancel", handleTouches);
+      }
+    };
+  }, [editor, ref, viewportId]);
+}
+export {
+  useGestureEvents
+};
+//# sourceMappingURL=useGestureEvents.mjs.map
