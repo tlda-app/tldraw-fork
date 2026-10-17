@@ -39,6 +39,11 @@ export interface TLSvgExportOptions {
 	 */
 	background?: boolean
 
+	/** Reject failed or timed-out preparation instead of allowing partial output. Defaults to false. */
+	strict?: boolean
+	/** Cancel strict preparation, including custom shape work. */
+	signal?: AbortSignal
+
 	/**
 	 * How much padding to include around the bounds of exports.
 	 *

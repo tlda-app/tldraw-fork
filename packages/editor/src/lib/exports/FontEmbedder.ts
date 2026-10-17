@@ -22,12 +22,14 @@ export const SVG_EXPORT_CLASSNAME = 'tldraw-svg-export'
  */
 export class FontEmbedder {
 	private fontFacesPromise: Promise<ParsedFontFace[]> | null = null
+	private sourceDocument: Document | null = null
 	private readonly foundFontNames = new Set<string>()
 	private readonly fontFacesToEmbed = new Set<ParsedFontFace>()
 	private readonly pendingPromises: Promise<void>[] = []
 
 	startFindingDocumentFontFaces(doc: Document) {
 		assert(!this.fontFacesPromise, 'FontEmbedder already started')
+		this.sourceDocument = doc
 		this.fontFacesPromise = getDocumentFontFaces(doc)
 	}
 
@@ -36,7 +38,7 @@ export class FontEmbedder {
 
 		const fonts = parseCssFontFamilyValue(fontFamilyValue)
 		for (const font of fonts) {
-			if (this.foundFontNames.has(font)) return
+			if (this.foundFontNames.has(font)) continue
 			this.foundFontNames.add(font)
 
 			this.pendingPromises.push(
@@ -57,18 +59,39 @@ export class FontEmbedder {
 		}
 	}
 
-	async createCss() {
+	async createCss(strict = false) {
 		await Promise.all(this.pendingPromises)
+		if (strict) {
+			const faces = await this.fontFacesPromise
+			for (const font of this.sourceDocument?.fonts ?? []) {
+				for (const family of parseCssFontFamilyValue(font.family)) {
+					if (
+						this.foundFontNames.has(family) &&
+						!faces?.some((face) => face.fontFamilies.has(family))
+					) {
+						throw new Error(`Cannot embed the source font face ${font.family}`)
+					}
+				}
+			}
+		}
 
 		let css = ''
 
 		for (const fontFace of this.fontFacesToEmbed) {
+			if (strict && !fontFace.urls.length)
+				throw new Error('A source font face has no embeddable font bytes')
 			let fontFaceString = `@font-face {${fontFace.fontFace}}`
 
 			for (const url of fontFace.urls) {
-				if (!url.embedded) continue
+				if (!url.embedded) {
+					if (strict) throw new Error('A source font URL could not be resolved')
+					continue
+				}
 				const dataUrl = await url.embedded
-				if (!dataUrl) continue
+				if (!dataUrl) {
+					if (strict) throw new Error('A source font could not be embedded')
+					continue
+				}
 
 				fontFaceString = fontFaceString.replace(url.original, dataUrl)
 			}
@@ -91,8 +114,36 @@ async function getDocumentFontFaces(doc: Document) {
 	// To avoid this, we filter out the stylesheets that are part of the SVG export.
 	const styleSheetsWithoutSvgExports = Array.from(doc.styleSheets).filter(
 		(styleSheet) =>
+			!styleSheet.disabled &&
+			(!styleSheet.media.length || win.matchMedia(styleSheet.media.mediaText).matches) &&
 			!(styleSheet.ownerNode as HTMLElement | null)?.closest(`.${SVG_EXPORT_CLASSNAME}`)
 	)
+	const visitRules = (rules: CSSRuleList, base: string) => {
+		for (const rule of rules) {
+			if (rule instanceof win.CSSFontFaceRule) {
+				fontFaces.push(parseCssFontFaces(rule.cssText, base))
+			} else if (rule instanceof win.CSSImportRule) {
+				if (rule.media.length && !win.matchMedia(rule.media.mediaText).matches) continue
+				if (rule.supportsText && !win.CSS.supports(rule.supportsText)) continue
+				const url = new URL(rule.href, rule.parentStyleSheet?.href ?? base).href
+				let imported: CSSRuleList | undefined
+				try {
+					imported = rule.styleSheet?.cssRules
+				} catch {
+					/* Fetch inaccessible imports below. */
+				}
+				if (imported) visitRules(imported, url)
+				else fontFaces.push(fetchCssFontFaces(url))
+			} else if ('cssRules' in rule) {
+				// Sample the active source viewport, including carried @import media
+				// wrappers. Inactive competing faces must not be flattened into it.
+				if (rule instanceof win.CSSMediaRule && !win.matchMedia(rule.conditionText).matches)
+					continue
+				if (rule instanceof win.CSSSupportsRule && !win.CSS.supports(rule.conditionText)) continue
+				visitRules((rule as CSSGroupingRule).cssRules, base)
+			}
+		}
+	}
 
 	for (const styleSheet of styleSheetsWithoutSvgExports) {
 		let cssRules
@@ -103,14 +154,7 @@ async function getDocumentFontFaces(doc: Document) {
 		}
 
 		if (cssRules) {
-			for (const rule of styleSheet.cssRules) {
-				if (rule instanceof win.CSSFontFaceRule) {
-					fontFaces.push(parseCssFontFaces(rule.cssText, styleSheet.href ?? doc.baseURI))
-				} else if (rule instanceof win.CSSImportRule) {
-					const absoluteUrl = new URL(rule.href, rule.parentStyleSheet?.href ?? doc.baseURI)
-					fontFaces.push(fetchCssFontFaces(absoluteUrl.href))
-				}
-			}
+			visitRules(cssRules, styleSheet.href ?? doc.baseURI)
 		} else if (styleSheet.href) {
 			fontFaces.push(fetchCssFontFaces(styleSheet.href))
 		}

@@ -80,7 +80,7 @@ export class FontManager {
 		this.shapeFontLoadStateCache.get(shapeId)
 	}
 
-	async loadRequiredFontsForCurrentPage(limit = Infinity) {
+	async loadRequiredFontsForCurrentPage(limit = Infinity, strict = false) {
 		const neededFonts = new Set<TLFontFace>()
 		for (const shapeId of this.editor.getCurrentPageShapeIds()) {
 			for (const font of this.getShapeFontFaces(this.editor.getShape(shapeId)!)) {
@@ -89,11 +89,18 @@ export class FontManager {
 		}
 
 		if (neededFonts.size > limit) {
+			if (strict) throw new Error('Required export fonts exceed the configured font-loading limit')
 			return
 		}
 
 		const promises = Array.from(neededFonts, (font) => this.ensureFontIsLoaded(font))
 		await Promise.all(promises)
+		if (
+			strict &&
+			Array.from(neededFonts).some((font) => this.getFontState(font)?.state !== 'ready')
+		) {
+			throw new Error('A required export font failed to load')
+		}
 	}
 
 	private readonly fontStates = new AtomMap<TLFontFace, FontState>('font states')

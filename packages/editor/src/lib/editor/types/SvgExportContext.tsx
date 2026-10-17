@@ -14,6 +14,10 @@ export interface SvgExportDef {
 
 /** @public */
 export interface SvgExportContext {
+	/** Whether this export must reject incomplete preparation. */
+	readonly strict?: boolean
+	/** Aborted when strict preparation finishes or the export is disposed. */
+	readonly signal?: AbortSignal
 	/**
 	 * Add contents to the `<defs>` section of the export SVG. Each export def should have a unique
 	 * key. If multiple defs come with the same key, only one will be added.

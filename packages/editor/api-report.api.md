@@ -1762,6 +1762,12 @@ export class Ellipse2d extends Geometry2d {
     nearestPoint(A: VecLike): Vec;
 }
 
+// @public
+export function embedSvgHtml(roots: readonly Element[], options?: {
+    signal?: AbortSignal;
+    strict?: boolean;
+}): Promise<string>;
+
 // @public (undocumented)
 export class ErrorBoundary extends React_2.Component<React_2.PropsWithChildren<TLErrorBoundaryProps>, {
     error: Error | null;
@@ -1804,7 +1810,7 @@ export class FontManager {
     // (undocumented)
     getShapeFontFaces(shape: TLShape | TLShapeId): TLFontFace[];
     // (undocumented)
-    loadRequiredFontsForCurrentPage(limit?: number): Promise<void>;
+    loadRequiredFontsForCurrentPage(limit?: number, strict?: boolean): Promise<void>;
     // (undocumented)
     requestFonts(fonts: TLFontFace[]): void;
     // (undocumented)
@@ -3351,6 +3357,8 @@ export interface SvgExportContext {
     readonly pixelRatio: null | number;
     resolveAssetUrl(assetId: TLAssetId, width: number): Promise<null | string>;
     readonly scale: number;
+    readonly signal?: AbortSignal;
+    readonly strict?: boolean;
     waitUntil(promise: Promise<void>): void;
 }
 
@@ -4868,6 +4876,8 @@ export interface TLSvgExportOptions {
     pixelRatio?: number;
     preserveAspectRatio?: React.SVGAttributes<SVGSVGElement>['preserveAspectRatio'];
     scale?: number;
+    signal?: AbortSignal;
+    strict?: boolean;
 }
 
 // @public (undocumented)

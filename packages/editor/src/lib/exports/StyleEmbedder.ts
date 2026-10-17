@@ -76,7 +76,7 @@ export class StyleEmbedder {
 		this.styles.set(element, info)
 	}
 
-	fetchResources() {
+	fetchResources(strict = false) {
 		const promises: Promise<void>[] = []
 
 		for (const info of this.styles.values()) {
@@ -93,7 +93,10 @@ export class StyleEmbedder {
 
 					promises.push(
 						...urlMatches.map(async ({ url, original }) => {
-							const dataUrl = (await resourceToDataUrl(url)) ?? 'data:'
+							const embedded = await resourceToDataUrl(url)
+							if (strict && !embedded)
+								throw new Error('A source CSS resource could not be embedded')
+							const dataUrl = embedded ?? 'data:'
 							styles[property] = value.replace(original, `url("${dataUrl}")`)
 						})
 					)
@@ -192,8 +195,8 @@ export class StyleEmbedder {
 		return css
 	}
 
-	async getFontFaceCss() {
-		return await this.fonts.createCss()
+	async getFontFaceCss(strict = false) {
+		return await this.fonts.createCss(strict)
 	}
 
 	dispose() {

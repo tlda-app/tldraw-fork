@@ -116,6 +116,7 @@ import {
 	STYLUS_ERASER_BUTTON,
 } from '../constants'
 import { getOwnerWindow } from '../exports/domUtils'
+import { ExportDelay } from '../exports/ExportDelay'
 import { exportToSvg } from '../exports/exportToSvg'
 import { getSvgAsImageWithOptions, trimSvgToContent } from '../exports/getSvgAsImage'
 import { tlmenus } from '../globals/menus'
@@ -4722,7 +4723,8 @@ export class Editor extends EventEmitter<TLEventMap> {
 		let nextBackgroundIndex = this.options.maxShapesPerPage
 
 		const erasingShapeIds = this.getErasingShapeIds()
-		const culledShapeIds = useEditorState && !opts?.disableCulling ? this.getCulledShapes(opts) : null
+		const culledShapeIds =
+			useEditorState && !opts?.disableCulling ? this.getCulledShapes(opts) : null
 
 		const addShapeById = (id: TLShapeId, opacity: number, isAncestorErasing: boolean) => {
 			if (culledShapeIds?.has(id)) return
@@ -10273,6 +10275,7 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 * @public
 	 */
 	async getSvgElement(shapes: TLShapeId[] | TLShape[], opts: TLSvgExportOptions = {}) {
+		if (opts.strict) opts.signal?.throwIfAborted()
 		const ids =
 			shapes.length === 0
 				? this.getCurrentPageShapeIdsSorted()
@@ -10286,9 +10289,18 @@ export class Editor extends EventEmitter<TLEventMap> {
 		// layout of any text within it - depend on the right fonts having loaded. Wait for them
 		// before we measure; otherwise an export taken before fonts finish loading (e.g. right
 		// after the editor mounts) is sized and laid out with fallback-font metrics.
-		await this.fonts.loadRequiredFontsForCurrentPage(this.options.maxFontsToLoadBeforeRender)
-
-		return exportToSvg(this, ids, opts)
+		const delay = opts.strict ? new ExportDelay(this.options.maxExportDelayMs, opts) : undefined
+		try {
+			const fonts = this.fonts.loadRequiredFontsForCurrentPage(
+				this.options.maxFontsToLoadBeforeRender,
+				opts.strict
+			)
+			if (delay) await delay.waitFor(fonts)
+			else await fonts
+			return await exportToSvg(this, ids, opts, delay)
+		} finally {
+			delay?.dispose()
+		}
 	}
 
 	/**
@@ -10324,59 +10336,76 @@ export class Editor extends EventEmitter<TLEventMap> {
 	 * @public
 	 */
 	async toImage(shapes: TLShapeId[] | TLShape[], opts: TLImageExportOptions = {}) {
+		if (opts.strict) opts.signal?.throwIfAborted()
 		const withDefaults = {
 			format: 'png',
 			scale: 1,
 			pixelRatio: opts.format === 'svg' ? undefined : 2,
 			...opts,
 		} satisfies TLImageExportOptions
-		const result = await this.getSvgString(shapes, withDefaults)
-		if (!result) throw new Error('Could not create SVG')
+		const delay = new ExportDelay(this.options.maxExportDelayMs, withDefaults)
+		try {
+			const result = await delay.waitFor(
+				this.getSvgString(shapes, {
+					...withDefaults,
+					signal: withDefaults.strict ? delay.signal : withDefaults.signal,
+				})
+			)
+			if (!result) throw new Error('Could not create SVG')
 
-		switch (withDefaults.format) {
-			case 'svg': {
-				let svg = result.svg
-				let w = result.width
-				let h = result.height
-				if (result.trimPadding > 0) {
-					const trimmed = await trimSvgToContent(svg, {
+			switch (withDefaults.format) {
+				case 'svg': {
+					let svg = result.svg
+					let w = result.width
+					let h = result.height
+					if (result.trimPadding > 0) {
+						const trimmed = await delay.waitFor(
+							trimSvgToContent(svg, {
+								width: w,
+								height: h,
+								trimPadding: result.trimPadding,
+								scale: withDefaults.scale,
+								signal: withDefaults.strict ? delay.signal : undefined,
+							})
+						)
+						if (trimmed) {
+							svg = trimmed.svg
+							w = trimmed.width
+							h = trimmed.height
+						}
+					}
+					return {
+						blob: new Blob([svg], { type: 'image/svg+xml' }),
 						width: w,
 						height: h,
-						trimPadding: result.trimPadding,
-						scale: withDefaults.scale,
-					})
-					if (trimmed) {
-						svg = trimmed.svg
-						w = trimmed.width
-						h = trimmed.height
 					}
 				}
-				return {
-					blob: new Blob([svg], { type: 'image/svg+xml' }),
-					width: w,
-					height: h,
+				case 'jpeg':
+				case 'png':
+				case 'webp': {
+					const imageResult = await delay.waitFor(
+						getSvgAsImageWithOptions(result.svg, {
+							type: withDefaults.format,
+							quality: withDefaults.quality,
+							pixelRatio: withDefaults.pixelRatio,
+							width: result.width,
+							height: result.height,
+							trimPadding: result.trimPadding,
+							scale: withDefaults.scale,
+							signal: withDefaults.strict ? delay.signal : undefined,
+						})
+					)
+					if (!imageResult) {
+						throw new Error('Could not construct image.')
+					}
+					return imageResult
+				}
+				default: {
+					exhaustiveSwitchError(withDefaults.format)
 				}
 			}
-			case 'jpeg':
-			case 'png':
-			case 'webp': {
-				const imageResult = await getSvgAsImageWithOptions(result.svg, {
-					type: withDefaults.format,
-					quality: withDefaults.quality,
-					pixelRatio: withDefaults.pixelRatio,
-					width: result.width,
-					height: result.height,
-					trimPadding: result.trimPadding,
-					scale: withDefaults.scale,
-				})
-				if (!imageResult) {
-					throw new Error('Could not construct image.')
-				}
-				return imageResult
-			}
-			default: {
-				exhaustiveSwitchError(withDefaults.format)
-			}
+		} finally {
+			delay.dispose()
 		}
 	}
 

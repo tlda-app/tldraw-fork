@@ -30,9 +30,20 @@ export async function getSvgAsImageWithOptions(
 		pixelRatio?: number
 		trimPadding?: number
 		scale?: number
+		signal?: AbortSignal
 	}
 ): Promise<{ blob: Blob; width: number; height: number } | null> {
-	const { type, width, height, quality = 1, pixelRatio = 2, trimPadding = 0, scale = 1 } = options
+	const {
+		type,
+		width,
+		height,
+		quality = 1,
+		pixelRatio = 2,
+		trimPadding = 0,
+		scale = 1,
+		signal,
+	} = options
+	signal?.throwIfAborted()
 
 	if (width <= 0 || height <= 0) return null
 
@@ -44,7 +55,8 @@ export async function getSvgAsImageWithOptions(
 	clampedHeight = Math.floor(clampedHeight)
 	const effectiveScale = clampedWidth / width
 
-	const canvas = await renderSvgToCanvas(svgString, clampedWidth, clampedHeight)
+	const canvas = await renderSvgToCanvas(svgString, clampedWidth, clampedHeight, signal)
+	signal?.throwIfAborted()
 
 	if (!canvas) return null
 
@@ -57,6 +69,10 @@ export async function getSvgAsImageWithOptions(
 	const blob = await new Promise<Blob | null>((resolve) =>
 		outputCanvas.canvas.toBlob(
 			(blob) => {
+				if (signal?.aborted) {
+					resolve(null)
+					return
+				}
 				if (!blob || debugFlags.throwToBlob.get()) {
 					resolve(null)
 				}
@@ -66,12 +82,15 @@ export async function getSvgAsImageWithOptions(
 			quality
 		)
 	)
+	signal?.throwIfAborted()
 
 	if (!blob) return null
 
 	let resultBlob: Blob
 	if (type === 'png') {
-		resultBlob = PngHelpers.setPhysChunk(new DataView(await blob.arrayBuffer()), effectiveScale, {
+		const bytes = await blob.arrayBuffer()
+		signal?.throwIfAborted()
+		resultBlob = PngHelpers.setPhysChunk(new DataView(bytes), effectiveScale, {
 			type: 'image/' + type,
 		})
 	} else {
@@ -88,42 +107,60 @@ export async function getSvgAsImageWithOptions(
 async function renderSvgToCanvas(
 	svgString: string,
 	width: number,
-	height: number
+	height: number,
+	signal?: AbortSignal
 ): Promise<HTMLCanvasElement | null> {
+	signal?.throwIfAborted()
 	// usually we would use `URL.createObjectURL` here, but chrome has a bug where `blob:` URLs of
 	// SVGs that use <foreignObject> mark the canvas as tainted, where data: ones do not.
 	// https://issues.chromium.org/issues/41054640
 	const svgUrl = await FileHelpers.blobToDataUrl(new Blob([svgString], { type: 'image/svg+xml' }))
+	signal?.throwIfAborted()
 
-	return new Promise<HTMLCanvasElement | null>((resolve) => {
-		const image = Image()
-		image.crossOrigin = 'anonymous'
+	const image = Image()
+	let abort: (() => void) | undefined
+	try {
+		return await new Promise<HTMLCanvasElement | null>((resolve, reject) => {
+			image.crossOrigin = 'anonymous'
+			abort = () => {
+				image.onload = image.onerror = null
+				image.src = ''
+				reject(new Error('SVG image preparation was cancelled'))
+			}
+			signal?.addEventListener('abort', abort, { once: true })
 
-		image.onload = async () => {
-			// safari will fire `onLoad` before the fonts in the SVG are
-			// actually loaded. just waiting around a while is brittle, but
-			// there doesn't seem to be any better solution for now :( see
-			// https://bugs.webkit.org/show_bug.cgi?id=219770
-			if (tlenv.isSafari) {
-				await sleep(250)
+			image.onload = async () => {
+				try {
+					// safari will fire `onLoad` before the fonts in the SVG are
+					// actually loaded. just waiting around a while is brittle, but
+					// there doesn't seem to be any better solution for now :( see
+					// https://bugs.webkit.org/show_bug.cgi?id=219770
+					if (tlenv.isSafari) await sleep(250)
+					signal?.throwIfAborted()
+
+					const canvas = getGlobalDocument().createElement('canvas') as HTMLCanvasElement
+					const ctx = canvas.getContext('2d')!
+					canvas.width = width
+					canvas.height = height
+					ctx.imageSmoothingEnabled = true
+					ctx.imageSmoothingQuality = 'high'
+					ctx.drawImage(image, 0, 0, width, height)
+					resolve(canvas)
+				} catch (error) {
+					reject(error)
+				}
 			}
 
-			const canvas = getGlobalDocument().createElement('canvas') as HTMLCanvasElement
-			const ctx = canvas.getContext('2d')!
-			canvas.width = width
-			canvas.height = height
-			ctx.imageSmoothingEnabled = true
-			ctx.imageSmoothingQuality = 'high'
-			ctx.drawImage(image, 0, 0, width, height)
-			resolve(canvas)
-		}
+			image.onerror = () => {
+				resolve(null)
+			}
 
-		image.onerror = () => {
-			resolve(null)
-		}
-
-		image.src = svgUrl
-	})
+			image.src = svgUrl
+		})
+	} finally {
+		image.onload = image.onerror = null
+		if (abort) signal?.removeEventListener('abort', abort)
+	}
 }
 
 /**
@@ -296,9 +333,11 @@ export async function trimSvgToContent(
 		height: number
 		trimPadding: number
 		scale: number
+		signal?: AbortSignal
 	}
 ): Promise<{ svg: string; width: number; height: number } | null> {
-	const { width, height, trimPadding, scale } = options
+	const { width, height, trimPadding, scale, signal } = options
+	signal?.throwIfAborted()
 
 	if (trimPadding <= 0) return null
 
@@ -308,7 +347,8 @@ export async function trimSvgToContent(
 
 	if (canvasWidth <= 0 || canvasHeight <= 0) return null
 
-	const canvas = await renderSvgToCanvas(svgString, canvasWidth, canvasHeight)
+	const canvas = await renderSvgToCanvas(svgString, canvasWidth, canvasHeight, signal)
+	signal?.throwIfAborted()
 
 	if (!canvas) return null
 

@@ -31,7 +31,12 @@ import { Box } from '../primitives/Box'
 import { Mat } from '../primitives/Mat'
 import { ExportDelay } from './ExportDelay'
 
-export function getSvgJsx(editor: Editor, ids: TLShapeId[], opts: TLImageExportOptions = {}) {
+export function getSvgJsx(
+	editor: Editor,
+	ids: TLShapeId[],
+	opts: TLImageExportOptions = {},
+	delay?: ExportDelay
+) {
 	const editorDocument = editor.getContainerDocument()
 	if (!editorDocument) throw Error('No document')
 
@@ -99,7 +104,9 @@ export function getSvgJsx(editor: Editor, ids: TLShapeId[], opts: TLImageExportO
 		// not implemented
 	}
 
-	const exportDelay = new ExportDelay(editor.options.maxExportDelayMs)
+	const exportDelay =
+		delay ??
+		new ExportDelay(editor.options.maxExportDelayMs, { strict: opts.strict, signal: opts.signal })
 
 	const initialEffectPromise = promiseWithResolve<void>()
 	exportDelay.waitUntil(initialEffectPromise)
@@ -107,6 +114,8 @@ export function getSvgJsx(editor: Editor, ids: TLShapeId[], opts: TLImageExportO
 	const svg = (
 		<SvgExport
 			editor={editor}
+			strict={opts.strict ?? false}
+			signal={opts.strict ? exportDelay.signal : undefined}
 			preserveAspectRatio={preserveAspectRatio}
 			scale={scale}
 			pixelRatio={opts.pixelRatio ?? null}
@@ -198,6 +207,8 @@ export function getExportDefaultBounds(
 
 function SvgExport({
 	editor,
+	strict,
+	signal,
 	preserveAspectRatio,
 	scale,
 	pixelRatio,
@@ -211,6 +222,8 @@ function SvgExport({
 	waitUntil,
 }: {
 	editor: Editor
+	strict: boolean
+	signal?: AbortSignal
 	preserveAspectRatio?: string
 	scale: number
 	pixelRatio: number | null
@@ -234,14 +247,17 @@ function SvgExport({
 		shapeElements: ReactElement[] | null
 	}>('export state', { defsById: {}, shapeElements: null })
 	const { defsById, shapeElements } = useValue(stateAtom)
+	const disposedRef = useRef(false)
 
 	const addExportDef = useEvent((def: SvgExportDef) => {
+		if (strict && (disposedRef.current || signal?.aborted)) return
 		stateAtom.update((state) => {
 			if (hasOwnProperty(state.defsById, def.key)) return state
 
 			const promise = Promise.resolve(def.getElement())
 			waitUntil(
 				promise.then((result) => {
+					if (strict && (disposedRef.current || signal?.aborted)) return
 					stateAtom.update((state) => ({
 						...state,
 						defsById: { ...state.defsById, [def.key]: { pending: false, element: result } },
@@ -257,6 +273,8 @@ function SvgExport({
 
 	const exportContext = useMemo(
 		(): SvgExportContext => ({
+			strict,
+			signal,
 			isDarkMode,
 			colorMode,
 			waitUntil,
@@ -274,7 +292,7 @@ function SvgExport({
 				})
 			},
 		}),
-		[isDarkMode, colorMode, waitUntil, addExportDef, scale, pixelRatio, editor]
+		[isDarkMode, colorMode, waitUntil, addExportDef, scale, pixelRatio, editor, strict, signal]
 	)
 
 	const didRenderRef = useRef(false)
@@ -283,7 +301,8 @@ function SvgExport({
 			throw new Error('SvgExport should only render once - do not use with react strict mode')
 		}
 		didRenderRef.current = true
-		;(async () => {
+		const rendering = (async () => {
+			if (strict && (disposedRef.current || signal?.aborted)) return
 			const shapeDefs: Record<string, { pending: false; element: ReactElement }> = {}
 
 			// Then render everything. The shapes with assets should all hit the cache
@@ -305,6 +324,7 @@ function SvgExport({
 							util.toSvg?.(shape, exportContext),
 							util.toBackgroundSvg?.(shape, exportContext),
 						])
+						if (strict && (disposedRef.current || signal?.aborted)) return []
 
 						const pageTransform = editor.getShapePageTransform(shape)
 						let pageTransformString = pageTransform!.toCssString()
@@ -408,6 +428,7 @@ function SvgExport({
 			)
 
 			const unorderedShapeElements = (await Promise.all(unorderedShapeElementPromises)).flat()
+			if (strict && (disposedRef.current || signal?.aborted)) return
 
 			flushSync(() => {
 				stateAtom.update((state) => ({
@@ -419,7 +440,22 @@ function SvgExport({
 				}))
 			})
 		})()
-	}, [bbox, editor, exportContext, masksId, renderingShapes, singleFrameShapeId, stateAtom])
+		if (strict) waitUntil(rendering)
+		return () => {
+			disposedRef.current = true
+		}
+	}, [
+		bbox,
+		editor,
+		exportContext,
+		masksId,
+		renderingShapes,
+		singleFrameShapeId,
+		stateAtom,
+		strict,
+		signal,
+		waitUntil,
+	])
 
 	useEffect(() => {
 		const fontsInUse = new Set<TLFontFace>()

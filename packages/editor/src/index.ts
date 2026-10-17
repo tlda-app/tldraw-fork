@@ -288,6 +288,7 @@ export {
 } from './lib/editor/types/SvgExportContext'
 export { getOwnerDocument, getOwnerWindow } from './lib/exports/domUtils'
 export { getSvgAsImage } from './lib/exports/getSvgAsImage'
+export { embedSvgHtml } from './lib/exports/exportToSvg'
 export { tlenv, tlenvReactive } from './lib/globals/environment'
 export { tlmenus } from './lib/globals/menus'
 export { tltime } from './lib/globals/time'

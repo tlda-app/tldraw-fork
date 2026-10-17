@@ -6,6 +6,7 @@ import type { Editor } from '../editor/Editor'
 import { TLSvgExportOptions } from '../editor/types/misc-types'
 import { getOwnerWindow } from './domUtils'
 import { embedMedia } from './embedMedia'
+import { ExportDelay } from './ExportDelay'
 import { SVG_EXPORT_CLASSNAME } from './FontEmbedder'
 import { getSvgJsx } from './getSvgJsx'
 import { StyleEmbedder } from './StyleEmbedder'
@@ -15,12 +16,13 @@ let idCounter = 1
 export async function exportToSvg(
 	editor: Editor,
 	shapeIds: TLShapeId[],
-	opts: TLSvgExportOptions = {}
+	opts: TLSvgExportOptions = {},
+	delay?: ExportDelay
 ) {
 	// when rendering to SVG, we start by creating a JSX representation of the SVG that we can
 	// render with react. Hopefully elements will have a `toSvg` method that renders them to SVG,
 	// but if they don't we'll render their normal HTML content into an svg <foreignObject> element.
-	const result = getSvgJsx(editor, shapeIds, opts)
+	const result = getSvgJsx(editor, shapeIds, opts, delay)
 	if (!result) return undefined
 
 	// we need to render that SVG into a real DOM element that's actually laid out in the document.
@@ -49,6 +51,7 @@ export async function exportToSvg(
 	try {
 		// ...wait for a tick so we know we're not in e.g. a react lifecycle method...
 		await Promise.resolve()
+		if (opts.strict) result.exportDelay.signal.throwIfAborted()
 
 		// ...and render the SVG into it.
 		flushSync(() => {
@@ -69,10 +72,16 @@ export async function exportToSvg(
 		// would expect them to. But when we pull the SVG into its own file or draw it to a canvas
 		// though, it has to be completely self-contained. We embed any external resources, and
 		// apply any styles directly to the elements themselves.
-		await applyChangesToForeignObjects(svg)
+		await result.exportDelay.waitFor(
+			applyChangesToForeignObjects(svg, {
+				strict: opts.strict,
+				signal: opts.strict ? result.exportDelay.signal : undefined,
+			})
+		)
 
 		return { svg, width: result.width, height: result.height, trimPadding: result.trimPadding }
 	} finally {
+		result.exportDelay.dispose()
 		// eslint-disable-next-line no-restricted-globals
 		setTimeout(() => {
 			// we wait for a cycle of the event loop to allow the svg to be cloned etc. before
@@ -83,35 +92,68 @@ export async function exportToSvg(
 	}
 }
 
-async function applyChangesToForeignObjects(svg: SVGSVGElement) {
+async function applyChangesToForeignObjects(
+	svg: SVGSVGElement,
+	options: { strict?: boolean; signal?: AbortSignal }
+) {
 	// If any shapes have their own <foreignObject> elements, we don't want to mess with them. Our
 	// ones that we need to embed will have a class of `tl-export-embed-styles`.
 	const foreignObjectChildren = [
 		...svg.querySelectorAll('foreignObject.tl-export-embed-styles > *'),
 	]
 	if (!foreignObjectChildren.length) return
+	const css = await embedSvgHtml(foreignObjectChildren, options)
+	if (css) {
+		const style = svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'style')
+		style.textContent = css
+		svg.prepend(style)
+	}
+}
+
+/**
+ * Embed the computed styles, fonts and media of connected HTML roots in their
+ * original document. Mutates the roots; use disposable content, and move or
+ * clone it only after this promise resolves. Returns the required font and
+ * pseudo-element CSS to carry with that content into an SVG.
+ *
+ * @public
+ */
+export async function embedSvgHtml(
+	roots: readonly Element[],
+	options: { strict?: boolean; signal?: AbortSignal } = {}
+): Promise<string> {
+	options.signal?.throwIfAborted()
+	if (!roots.length) return ''
+	const document = roots[0].ownerDocument
+	assert(document.defaultView, 'HTML export source document has no browsing context')
+	assert(
+		roots.every((root) => root.isConnected && root.ownerDocument === document),
+		'HTML export roots must be connected to the same source document'
+	)
 
 	// StyleEmbedder embeds any CSS - including resources like fonts and images.
-	const styleEmbedder = new StyleEmbedder(svg)
+	const styleEmbedder = new StyleEmbedder(roots[0])
 
 	try {
 		// begin traversing stylesheets to find @font-face declarations we might need to embed
-		styleEmbedder.fonts.startFindingDocumentFontFaces(svg.ownerDocument)
+		styleEmbedder.fonts.startFindingDocumentFontFaces(document)
 
 		// embed any media elements in the foreignObject children. images will get converted to data
 		// urls, and things like videos will be converted to images.
-		await Promise.all(foreignObjectChildren.map((el) => embedMedia(el as HTMLElement)))
+		await Promise.all(roots.map((el) => embedMedia(el as HTMLElement)))
+		options.signal?.throwIfAborted()
 
 		// read the computed styles of every element (+ it's children & pseudo-elements) in the
 		// document. we do this in a single pass before we start embedding any CSS stuff to avoid
 		// constantly forcing the browser to recompute styles & layout.
-		for (const el of foreignObjectChildren) {
+		for (const el of roots) {
 			styleEmbedder.readRootElementStyles(el as HTMLElement)
 		}
 
 		// fetch any resources that we need to embed in the CSS, like background images.
-		await styleEmbedder.fetchResources()
-		const fontCss = await styleEmbedder.getFontFaceCss()
+		await styleEmbedder.fetchResources(options.strict)
+		const fontCss = await styleEmbedder.getFontFaceCss(options.strict)
+		options.signal?.throwIfAborted()
 
 		// custom elements that make use of the shadow dom won't be serialized correctly by default:
 		// the contents of the shadow dom will be ignored. once we've read the styles from the
@@ -125,12 +167,7 @@ async function applyChangesToForeignObjects(svg: SVGSVGElement) {
 		// returned as a string of CSS.
 		const pseudoCss = styleEmbedder.embedStyles()
 
-		// add the CSS to the SVG
-		if (fontCss || pseudoCss) {
-			const style = svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'style')
-			style.textContent = `${fontCss}\n${pseudoCss}`
-			svg.prepend(style)
-		}
+		return fontCss || pseudoCss ? `${fontCss}\n${pseudoCss}` : ''
 	} finally {
 		styleEmbedder.dispose()
 	}
