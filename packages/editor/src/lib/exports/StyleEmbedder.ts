@@ -273,7 +273,8 @@ function styleFromComputedStyle(
 		getStyle: (property: string) => style.getPropertyValue(property),
 	}
 
-	for (const property in style) {
+	for (let index = 0; index < style.length; index++) {
+		const property = style.item(index)
 		if (!shouldIncludeCssProperty(property)) continue
 
 		const value = style.getPropertyValue(property)
